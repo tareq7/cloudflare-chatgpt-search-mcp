@@ -10,7 +10,7 @@ A remote, read-only Model Context Protocol (MCP) search server designed to run o
 - Canonical URL resolution for DuckDuckGo and Bing tracking redirects before filtering and attribution
 - Strict post-retrieval domain filtering, including subdomains of requested domains
 - Lightweight lexical relevance scoring/gating to suppress malformed or off-topic SERP results
-- Adaptive `backend: "auto"` behavior with free fallback escalation, market-aware Arabic/Chinese sourcing queries, quality diagnostics, and optional paid Cloudflare Web Search escalation
+- Adaptive `backend: "auto"` behavior with free fallback escalation, market-aware Arabic/Chinese sourcing queries, explicit attempted/used fallback diagnostics, and optional paid Cloudflare Web Search escalation
 - News search using Google News RSS and Bing News RSS with publisher-domain filtering
 - Multi-query search with URL deduplication and domain diversity
 - Public-page extraction with SSRF protections

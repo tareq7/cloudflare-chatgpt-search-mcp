@@ -665,6 +665,7 @@ export async function searchWeb(env, {
 
   const errors = [];
   const fallbacksUsed = [];
+  const fallbacksAttempted = [];
   const searchQueries = [q];
   const primarySearches = [searchDuckDuckGo(q, cap)];
   if (env.ENABLE_BING_RSS === "1") {
@@ -684,6 +685,7 @@ export async function searchWeb(env, {
     processed.quality.average_top3 < 0.22;
 
   if (lowQuality()) {
+    fallbacksAttempted.push("duckduckgo-lite", "bing-html");
     const fallbackResults = await collectSearches([
       searchDuckDuckGoLite(q, cap),
       searchBingHtml(q, cap, market),
@@ -705,6 +707,7 @@ export async function searchWeb(env, {
 
   const marketQuery = buildMarketFallbackQuery(query, mode, market, domains);
   if (lowQuality() && marketQuery && marketQuery !== q) {
+    fallbacksAttempted.push("market-localized");
     const marketSearches = [searchDuckDuckGo(marketQuery, cap)];
     if (env.ENABLE_BING_RSS === "1") {
       marketSearches.push(searchBingRss(marketQuery, cap, market));
@@ -729,6 +732,7 @@ export async function searchWeb(env, {
   }
 
   if (backend === "auto" && lowQuality() && env.ALLOW_PAID_WEBSEARCH === "1") {
+    fallbacksAttempted.push("cloudflare-ceramic");
     try {
       const premium = await cloudflareSearch(env, q, "ceramic", n * 2);
       processed = postProcess([...rawResults, ...premium], query, domains, n);
@@ -739,6 +743,7 @@ export async function searchWeb(env, {
         backend: "auto:free+cloudflare-ceramic",
         paid_fallback_used: true,
         fallbacks_used: [...new Set(fallbacksUsed)],
+        fallbacks_attempted: [...new Set(fallbacksAttempted)],
         auto: {
           escalated: true,
           recovered,
@@ -756,16 +761,18 @@ export async function searchWeb(env, {
   }
 
   const uniqueFallbacks = [...new Set(fallbacksUsed)];
+  const uniqueAttempts = [...new Set(fallbacksAttempted)];
   const stillLow = lowQuality();
   const response = {
     query: q,
     search_queries: searchQueries,
-    backend: backend === "auto" && uniqueFallbacks.length
+    backend: backend === "auto" && uniqueAttempts.length
       ? "auto:free-fallbacks"
       : backend === "auto"
         ? "auto:free"
         : "free",
     fallbacks_used: uniqueFallbacks,
+    fallbacks_attempted: uniqueAttempts,
     quality: processed.quality,
     errors,
     results: processed.results,
@@ -774,12 +781,12 @@ export async function searchWeb(env, {
   if (backend === "auto") {
     response.auto = stillLow
       ? {
-          escalated: uniqueFallbacks.length > 0,
+          escalated: uniqueAttempts.length > 0,
           reason: env.ALLOW_PAID_WEBSEARCH === "1"
             ? "paid_fallback_failed"
             : "paid_fallback_disabled",
         }
-      : uniqueFallbacks.length
+      : uniqueAttempts.length
         ? { escalated: true, reason: "free_fallback_recovered" }
         : { escalated: false, reason: "free_quality_acceptable" };
   }

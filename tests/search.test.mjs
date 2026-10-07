@@ -471,6 +471,40 @@ test("fallback telemetry only reports providers that returned results", async ()
   assert.deepEqual(result.fallbacks_used, ["duckduckgo-lite"]);
 });
 
+test("auto reports fallback attempts even when no fallback returns results", async () => {
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (
+      url.hostname === "html.duckduckgo.com" ||
+      url.hostname === "lite.duckduckgo.com" ||
+      url.hostname === "www.bing.com"
+    ) {
+      return ok("<html><body>No useful results</body></html>");
+    }
+    throw new Error("unexpected URL " + url);
+  };
+
+  const result = await searchWeb(
+    { ALLOW_PAID_WEBSEARCH: "0" },
+    {
+      query: "Cloudflare remote MCP Workers OAuth",
+      mode: "web",
+      market: "global",
+      limit: 3,
+      backend: "auto",
+    },
+  );
+
+  assert.equal(result.results.length, 0);
+  assert.equal(result.auto.escalated, true);
+  assert.equal(result.auto.reason, "paid_fallback_disabled");
+  assert.deepEqual(
+    result.fallbacks_attempted,
+    ["duckduckgo-lite", "bing-html"],
+  );
+  assert.deepEqual(result.fallbacks_used, []);
+});
+
 test("auto reports when paid fallback is exhausted without recovering quality", async () => {
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
@@ -512,6 +546,7 @@ test("auto reports when paid fallback is exhausted without recovering quality", 
   });
 
   assert.equal(result.paid_fallback_used, true);
+  assert.ok(result.fallbacks_attempted.includes("cloudflare-ceramic"));
   assert.equal(result.auto.recovered, false);
   assert.equal(result.auto.reason, "paid_fallback_exhausted");
 });
