@@ -47,34 +47,172 @@ function tag(block, name) {
   return stripHtml(block.slice(bodyStart + 1, end));
 }
 
-function normalizeUrl(raw) {
+function decodeBingTarget(value) {
+  if (!value) return "";
+  let encoded = value;
   try {
-    let value = decodeHtml(raw);
-    if (value.startsWith("//")) value = "https:" + value;
-    const u = new URL(value, "https://duckduckgo.com");
-    if (u.hostname.endsWith("duckduckgo.com") && u.pathname.startsWith("/l/")) {
-      const target = u.searchParams.get("uddg");
-      if (target) return decodeURIComponent(target);
-    }
-    u.hash = "";
-    for (const key of [...u.searchParams.keys()]) {
-      if (/^(utm_|fbclid|gclid|msclkid)/i.test(key)) u.searchParams.delete(key);
-    }
-    return u.toString();
-  } catch {
-    return raw;
-  }
-}
-
-function hostOf(url) {
+    encoded = decodeURIComponent(encoded);
+  } catch {}
+  if (/^a\d/i.test(encoded)) encoded = encoded.slice(2);
+  encoded = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  encoded += "=".repeat((4 - (encoded.length % 4)) % 4);
   try {
-    return new URL(url).hostname.replace(/^www\./, "");
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const decoded = new TextDecoder().decode(bytes);
+    return /^https?:\/\//i.test(decoded) ? decoded : "";
   } catch {
     return "";
   }
 }
 
-function dedupe(results, limit) {
+function normalizeUrl(raw, depth = 0) {
+  if (!raw || depth > 3) return "";
+  try {
+    let value = decodeHtml(raw);
+    if (value.startsWith("//")) value = "https:" + value;
+    const u = new URL(value, "https://duckduckgo.com");
+    const host = u.hostname.toLowerCase();
+
+    if (host.endsWith("duckduckgo.com") && u.pathname.startsWith("/l/")) {
+      const target = u.searchParams.get("uddg");
+      return target ? normalizeUrl(target, depth + 1) : "";
+    }
+
+    if (host === "bing.com" || host.endsWith(".bing.com")) {
+      if (u.pathname.startsWith("/ck/")) {
+        const target = decodeBingTarget(u.searchParams.get("u"));
+        return target ? normalizeUrl(target, depth + 1) : "";
+      }
+      if (u.pathname.startsWith("/aclick")) return "";
+    }
+
+    u.hash = "";
+    for (const key of [...u.searchParams.keys()]) {
+      if (/^(utm_|fbclid|gclid|msclkid|mc_cid|mc_eid|ref_src|ref_url)$/i.test(key)) {
+        u.searchParams.delete(key);
+      }
+    }
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeDomain(value) {
+  try {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return "";
+    const u = new URL(text.includes("://") ? text : "https://" + text);
+    return u.hostname.replace(/^www\./, "");
+  } catch {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .split("/")[0]
+      .replace(/^www\./, "");
+  }
+}
+
+function matchesDomains(result, domains = []) {
+  const wanted = domains.map(normalizeDomain).filter(Boolean);
+  if (!wanted.length) return true;
+  const candidate = normalizeDomain(result.publisher_url || result.url || "");
+  return wanted.some((domain) =>
+    candidate === domain || candidate.endsWith("." + domain)
+  );
+}
+
+const STOPWORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+  "in", "is", "it", "of", "on", "or", "the", "to", "with",
+]);
+
+function queryTerms(query) {
+  const matches = String(query || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .match(/[\p{L}\p{N}]+(?:[._-][\p{L}\p{N}]+)*/gu) || [];
+  return [...new Set(matches.filter((term) => !STOPWORDS.has(term)))];
+}
+
+function relevanceDetails(result, query) {
+  const terms = queryTerms(query);
+  if (!terms.length) return { score: 1, matches: 0 };
+  const title = String(result.title || "").toLowerCase().normalize("NFKC");
+  const description = String(result.description || "").toLowerCase().normalize("NFKC");
+  const url = String(result.url || "").toLowerCase();
+  let weighted = 0;
+  let matches = 0;
+  for (const term of terms) {
+    if (title.includes(term)) {
+      weighted += 3;
+      matches += 1;
+    } else if (description.includes(term)) {
+      weighted += 1.5;
+      matches += 1;
+    } else if (url.includes(term)) {
+      weighted += 0.75;
+      matches += 1;
+    }
+  }
+  const normalizedQuery = terms.join(" ");
+  const phraseBonus = normalizedQuery.length > 3 && title.includes(normalizedQuery) ? 0.2 : 0;
+  return {
+    score: Math.min(1, weighted / (terms.length * 3) + phraseBonus),
+    matches,
+  };
+}
+
+function postProcess(results, query, domains, limit) {
+  const perDomainLimit = domains?.length ? Math.max(limit, 10) : 3;
+  const canonical = dedupe(results, Math.max(limit * 4, 20), perDomainLimit)
+    .filter((result) => matchesDomains(result, domains))
+    .map((result) => {
+      const relevance = relevanceDetails(result, query);
+      return {
+        ...result,
+        _score: relevance.score,
+        _matches: relevance.matches,
+      };
+    });
+
+  const terms = queryTerms(query);
+  const threshold = terms.length <= 1 ? 0.2 : terms.length <= 3 ? 0.18 : 0.14;
+  const minimumMatches = terms.length >= 4 ? 2 : terms.length ? 1 : 0;
+  const relevant = canonical
+    .filter((result) =>
+      result._score >= threshold && result._matches >= minimumMatches
+    )
+    .sort((a, b) => b._score - a._score)
+    .slice(0, limit);
+
+  const topScore = relevant[0]?._score || canonical[0]?._score || 0;
+  const avgTop3 = relevant.length
+    ? relevant.slice(0, 3).reduce((sum, result) => sum + result._score, 0) / Math.min(3, relevant.length)
+    : 0;
+
+  return {
+    results: relevant.map(({ _score, _matches, ...result }) => result),
+    quality: {
+      top_score: Number(topScore.toFixed(3)),
+      average_top3: Number(avgTop3.toFixed(3)),
+      kept: relevant.length,
+      discarded_low_relevance: Math.max(0, canonical.length - relevant.length),
+    },
+  };
+}
+
+function dedupe(results, limit, perDomainLimit = 3) {
   const seen = new Set();
   const perDomain = new Map();
   const out = [];
@@ -83,9 +221,9 @@ function dedupe(results, limit) {
     if (!/^https?:\/\//i.test(url)) continue;
     const key = url.replace(/\/$/, "").toLowerCase();
     if (seen.has(key)) continue;
-    const host = hostOf(url);
+    const host = hostOf(r.publisher_url || url) || hostOf(url);
     const count = perDomain.get(host) || 0;
-    if (count >= 3) continue;
+    if (count >= perDomainLimit) continue;
     seen.add(key);
     perDomain.set(host, count + 1);
     out.push({ ...r, url, domain: host });
@@ -109,8 +247,12 @@ function buildQuery(query, mode, market, domains = []) {
     q += " documentation GitHub release changelog";
   }
 
-  const cleanDomains = domains.filter(Boolean).slice(0, 5);
-  if (cleanDomains.length === 1) q += " site:" + cleanDomains[0].replace(/^https?:\/\//, "").split("/")[0];
+  const cleanDomains = domains.map(normalizeDomain).filter(Boolean).slice(0, 5);
+  if (cleanDomains.length === 1) {
+    q += " site:" + cleanDomains[0];
+  } else if (cleanDomains.length > 1) {
+    q += " (" + cleanDomains.map((domain) => "site:" + domain).join(" OR ") + ")";
+  }
   return q.slice(0, 1000);
 }
 
@@ -150,6 +292,29 @@ async function searchDuckDuckGo(query, limit) {
   return results;
 }
 
+async function searchDuckDuckGoLite(query, limit) {
+  const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
+  const html = await fetchText(url, { method: "GET" });
+  const blocks = html.split(/<a\b/i).slice(1);
+  const results = [];
+  for (const block of blocks) {
+    if (!/class=['"]result-link['"]/i.test(block)) continue;
+    const href = block.match(/href=['"]([^'"]+)['"]/i);
+    const openEnd = block.indexOf(">");
+    const close = block.search(/<\/a>/i);
+    if (!href || openEnd < 0 || close < 0) continue;
+    const snippet = block.match(/class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/i);
+    results.push({
+      title: stripHtml(block.slice(openEnd + 1, close)),
+      url: normalizeUrl(href[1]),
+      description: snippet ? stripHtml(snippet[1]) : "",
+      source: "duckduckgo-lite",
+    });
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
 async function searchBing(query, limit, market) {
   const p = new URLSearchParams({ q: query, count: String(Math.min(limit + 4, 20)) });
   const cc = MARKET[market]?.cc;
@@ -175,25 +340,30 @@ async function searchBing(query, limit, market) {
 
 function parseRss(xml, source, limit) {
   const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
-  return items.slice(0, limit).map((item) => ({
-    title: tag(item, "title"),
-    url: tag(item, "link"),
-    description: tag(item, "description"),
-    published_at: tag(item, "pubDate") || undefined,
-    source,
-  })).filter((r) => r.title && /^https?:\/\//i.test(r.url));
+  return items.slice(0, limit).map((item) => {
+    const publisher = item.match(/<source\b[^>]*url=["']([^"']+)["'][^>]*>([\s\S]*?)<\/source>/i);
+    return {
+      title: tag(item, "title"),
+      url: normalizeUrl(tag(item, "link")),
+      description: tag(item, "description"),
+      published_at: tag(item, "pubDate") || undefined,
+      publisher: publisher ? stripHtml(publisher[2]) : undefined,
+      publisher_url: publisher ? normalizeUrl(publisher[1]) : undefined,
+      source,
+    };
+  }).filter((r) => r.title && /^https?:\/\//i.test(r.url));
 }
 
-async function searchNews(query, limit, market) {
+async function searchNews(searchQuery, relevanceQuery, limit, market, domains = []) {
   const cc = MARKET[market]?.cc || "US";
   const [google, bing] = await Promise.allSettled([
-    fetchText("https://news.google.com/rss/search?q=" + encodeURIComponent(query) + "&hl=en-US&gl=" + cc + "&ceid=" + cc + ":en"),
-    fetchText("https://www.bing.com/news/search?q=" + encodeURIComponent(query) + "&format=RSS"),
+    fetchText("https://news.google.com/rss/search?q=" + encodeURIComponent(searchQuery) + "&hl=en-US&gl=" + cc + "&ceid=" + cc + ":en"),
+    fetchText("https://www.bing.com/news/search?q=" + encodeURIComponent(searchQuery) + "&format=RSS"),
   ]);
   const out = [];
-  if (google.status === "fulfilled") out.push(...parseRss(google.value, "google-news-rss", limit));
-  if (bing.status === "fulfilled") out.push(...parseRss(bing.value, "bing-news-rss", limit));
-  return dedupe(out, limit);
+  if (google.status === "fulfilled") out.push(...parseRss(google.value, "google-news-rss", limit * 2));
+  if (bing.status === "fulfilled") out.push(...parseRss(bing.value, "bing-news-rss", limit * 2));
+  return postProcess(out, relevanceQuery, domains, limit);
 }
 
 async function cloudflareSearch(env, query, provider, limit) {
@@ -224,8 +394,15 @@ export async function searchWeb(env, {
 }) {
   const n = Math.max(1, Math.min(Number(limit) || 10, 20));
   const q = buildQuery(query, mode, market, domains);
+
   if (mode === "news") {
-    return { query: q, backend: "free-news-rss", results: await searchNews(q, n, market) };
+    const news = await searchNews(q, query, n, market, domains);
+    return {
+      query: q,
+      backend: "free-news-rss",
+      quality: news.quality,
+      results: news.results,
+    };
   }
 
   if (backend.startsWith("cloudflare-")) {
@@ -234,30 +411,86 @@ export async function searchWeb(env, {
     }
     const provider = backend.replace("cloudflare-", "");
     if (!["exa", "linkup", "ceramic"].includes(provider)) throw new Error("Unsupported Cloudflare provider.");
-    return { query: q, backend, paid: true, results: dedupe(await cloudflareSearch(env, q, provider, n), n) };
+    const premium = postProcess(await cloudflareSearch(env, q, provider, n * 2), query, domains, n);
+    return {
+      query: q,
+      backend,
+      paid: true,
+      quality: premium.quality,
+      results: premium.results,
+    };
   }
 
-  const tasks = [searchDuckDuckGo(q, n), searchBing(q, n, market)];
-  const settled = await Promise.allSettled(tasks);
-  let results = [];
+  const settled = await Promise.allSettled([
+    searchDuckDuckGo(q, Math.min(n * 2, 20)),
+    searchBing(q, Math.min(n * 2, 20), market),
+  ]);
+
+  let rawResults = [];
   const errors = [];
-  for (const x of settled) {
-    if (x.status === "fulfilled") results.push(...x.value);
-    else errors.push(String(x.reason?.message || x.reason));
+  for (const result of settled) {
+    if (result.status === "fulfilled") rawResults.push(...result.value);
+    else errors.push(String(result.reason?.message || result.reason));
   }
-  results = dedupe(results, n);
 
-  if (backend === "auto" && results.length < Math.min(4, n) && env.ALLOW_PAID_WEBSEARCH === "1") {
+  let processed = postProcess(rawResults, query, domains, n);
+  const fallbacksUsed = [];
+  const minimumUseful = Math.min(3, n);
+  const lowQuality = () =>
+    processed.results.length < minimumUseful ||
+    processed.quality.top_score < 0.34 ||
+    processed.quality.average_top3 < 0.22;
+
+  if (lowQuality()) {
     try {
-      const premium = await cloudflareSearch(env, q, "ceramic", n);
-      results = dedupe([...results, ...premium], n);
-      return { query: q, backend: "free+cloudflare-ceramic", paid_fallback_used: true, errors, results };
-    } catch (e) {
-      errors.push("paid fallback: " + (e?.message || e));
+      const lite = await searchDuckDuckGoLite(q, Math.min(n * 2, 20));
+      rawResults.push(...lite);
+      processed = postProcess(rawResults, query, domains, n);
+      fallbacksUsed.push("duckduckgo-lite");
+    } catch (error) {
+      errors.push("duckduckgo-lite: " + String(error?.message || error));
     }
   }
 
-  return { query: q, backend: "free", errors, results };
+  if (backend === "auto" && lowQuality() && env.ALLOW_PAID_WEBSEARCH === "1") {
+    try {
+      const premium = await cloudflareSearch(env, q, "ceramic", n * 2);
+      processed = postProcess([...rawResults, ...premium], query, domains, n);
+      return {
+        query: q,
+        backend: "auto:free+cloudflare-ceramic",
+        paid_fallback_used: true,
+        fallbacks_used: fallbacksUsed,
+        quality: processed.quality,
+        errors,
+        results: processed.results,
+      };
+    } catch (error) {
+      errors.push("paid fallback: " + String(error?.message || error));
+    }
+  }
+
+  const response = {
+    query: q,
+    backend: backend === "auto" ? "auto:free" : "free",
+    fallbacks_used: fallbacksUsed,
+    quality: processed.quality,
+    errors,
+    results: processed.results,
+  };
+
+  if (backend === "auto") {
+    response.auto = lowQuality()
+      ? {
+          escalated: false,
+          reason: env.ALLOW_PAID_WEBSEARCH === "1"
+            ? "paid_fallback_failed"
+            : "paid_fallback_disabled",
+        }
+      : { escalated: false, reason: "free_quality_acceptable" };
+  }
+
+  return response;
 }
 
 export async function multiSearch(env, {
