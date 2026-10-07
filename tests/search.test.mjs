@@ -44,6 +44,17 @@ test("canonicalizes Bing redirect targets instead of returning bing.com", () => 
   assert.equal(__test.normalizeUrl(url), "https://openai.com/research/");
 });
 
+test("does not treat lookalike DuckDuckGo domains as redirect hosts", () => {
+  const target = encodeURIComponent("https://openai.com/research/");
+  const lookalike =
+    "https://evilduckduckgo.com/l/?uddg=" + target;
+
+  assert.equal(
+    __test.normalizeUrl(lookalike),
+    "https://evilduckduckgo.com/l/?uddg=" + target,
+  );
+});
+
 test("strict domain filtering runs on canonical destinations", () => {
   const encoded = Buffer.from("https://openai.com/index/example").toString("base64url");
   const results = __test.postProcess([
@@ -63,6 +74,43 @@ test("strict domain filtering runs on canonical destinations", () => {
 
   assert.equal(results.results.length, 1);
   assert.equal(results.results[0].domain, "openai.com");
+});
+
+test("provider fetch timeout aborts a stalled request", async () => {
+  globalThis.fetch = async (_input, init = {}) =>
+    await new Promise((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    });
+
+  await assert.rejects(
+    () => __test.fetchText(
+      "https://provider.example/search",
+      {},
+      { timeoutMs: 10, maxBytes: 4096 },
+    ),
+    /Timed out after 100 ms/,
+  );
+});
+
+test("provider fetch rejects oversized responses before parsing", async () => {
+  globalThis.fetch = async () =>
+    new Response("small", {
+      status: 200,
+      headers: { "content-length": "5000" },
+    });
+
+  await assert.rejects(
+    () => __test.fetchText(
+      "https://provider.example/search",
+      {},
+      { timeoutMs: 500, maxBytes: 1024 },
+    ),
+    /exceeded 1024 bytes/,
+  );
 });
 
 test("relevance gate rejects the unrelated benchmark failure classes", () => {
@@ -256,6 +304,65 @@ test("news domains are enforced using publisher metadata", async () => {
   assert.equal(result.results[0].domain, "techcrunch.com");
 });
 
+test("localized fallback scores localized-only results with the market query", async () => {
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    const q = url.searchParams.get("q") || "";
+
+    if (url.hostname === "html.duckduckgo.com") {
+      if (q.includes("السعودية")) {
+        return ok(
+          ddgResult(
+            "مورد السعودية مستودع مخزون محلي",
+            "https://supplier.example/ar/item-1",
+            "موزع السعودية مستودع مخزون محلي",
+          ) +
+          ddgResult(
+            "السعودية موزع مستودع مخزون محلي",
+            "https://supplier2.example/ar/item-2",
+            "مورد السعودية مخزون محلي",
+          ) +
+          ddgResult(
+            "مستودع السعودية مورد موزع مخزون محلي",
+            "https://supplier3.example/ar/item-3",
+            "السعودية مورد موزع",
+          ),
+        );
+      }
+      return ok(ddgResult(
+        "Demon Slayer",
+        "https://anime.example/show",
+        "Anime series",
+      ));
+    }
+
+    if (url.hostname === "lite.duckduckgo.com") {
+      return ok("<html><body>No useful results</body></html>");
+    }
+
+    if (url.hostname === "www.bing.com") {
+      return ok("<html><body>No organic results</body></html>");
+    }
+
+    throw new Error("unexpected URL " + url);
+  };
+
+  const result = await searchWeb(
+    { ALLOW_PAID_WEBSEARCH: "0" },
+    {
+      query: "no-drill C-clamp TV anti-tip straps",
+      mode: "supplier",
+      market: "SA",
+      limit: 3,
+      backend: "auto",
+    },
+  );
+
+  assert.equal(result.results.length, 3);
+  assert.ok(result.results.every((item) => !("_relevanceQuery" in item)));
+  assert.equal(result.auto.reason, "free_fallback_recovered");
+});
+
 test("auto uses free localized fallback before giving up when paid search is disabled", async () => {
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
@@ -320,6 +427,93 @@ test("auto uses free localized fallback before giving up when paid search is dis
   assert.equal(result.auto.escalated, true);
   assert.equal(result.auto.reason, "free_fallback_recovered");
   assert.ok(result.search_queries.some((q) => q.includes("السعودية")));
+});
+
+test("fallback telemetry only reports providers that returned results", async () => {
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+
+    if (url.hostname === "html.duckduckgo.com") {
+      return ok(ddgResult(
+        "Irrelevant cars",
+        "https://cars.example/",
+        "Cars",
+      ));
+    }
+
+    if (url.hostname === "lite.duckduckgo.com") {
+      return ok([
+        "<table>",
+        "<tr><td><a class='result-link' href='https://developers.cloudflare.com/agents/model-context-protocol/'>Cloudflare remote MCP OAuth</a></td></tr>",
+        "<tr><td class='result-snippet'>Cloudflare Workers MCP OAuth documentation</td></tr>",
+        "</table>",
+      ].join(""));
+    }
+
+    if (url.hostname === "www.bing.com") {
+      return ok("<html><body>No organic results</body></html>");
+    }
+
+    throw new Error("unexpected URL " + url);
+  };
+
+  const result = await searchWeb(
+    { ALLOW_PAID_WEBSEARCH: "0" },
+    {
+      query: "Cloudflare remote MCP Workers OAuth",
+      mode: "technical",
+      market: "global",
+      limit: 1,
+      backend: "auto",
+    },
+  );
+
+  assert.deepEqual(result.fallbacks_used, ["duckduckgo-lite"]);
+});
+
+test("auto reports when paid fallback is exhausted without recovering quality", async () => {
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (
+      url.hostname === "html.duckduckgo.com" ||
+      url.hostname === "lite.duckduckgo.com"
+    ) {
+      return ok("<html><body>No useful results</body></html>");
+    }
+    if (url.hostname === "www.bing.com") {
+      return ok("<html><body>No organic results</body></html>");
+    }
+    throw new Error("unexpected URL " + url);
+  };
+
+  const env = {
+    ALLOW_PAID_WEBSEARCH: "1",
+    AI: {
+      websearch: async () =>
+        new Response(JSON.stringify({
+          items: [{
+            title: "Unrelated sports page",
+            url: "https://sports.example/story",
+            description: "Football schedule",
+          }],
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    },
+  };
+
+  const result = await searchWeb(env, {
+    query: "Cloudflare remote MCP Workers OAuth",
+    mode: "web",
+    market: "global",
+    limit: 3,
+    backend: "auto",
+  });
+
+  assert.equal(result.paid_fallback_used, true);
+  assert.equal(result.auto.recovered, false);
+  assert.equal(result.auto.reason, "paid_fallback_exhausted");
 });
 
 test("market fallback variants cover China and UAE sourcing", () => {

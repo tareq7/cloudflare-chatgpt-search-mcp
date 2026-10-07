@@ -1,4 +1,6 @@
 const UA = "CloudflareSearchMCP/1.0";
+const PROVIDER_TIMEOUT_MS = 8000;
+const MAX_PROVIDER_RESPONSE_BYTES = 1_500_000;
 
 const MARKET = {
   global: { cc: "", label: "" },
@@ -96,7 +98,7 @@ function normalizeUrl(raw, depth = 0) {
     const u = new URL(value, "https://duckduckgo.com");
     const host = u.hostname.toLowerCase();
 
-    if (host.endsWith("duckduckgo.com")) {
+    if (host === "duckduckgo.com" || host.endsWith(".duckduckgo.com")) {
       if (u.pathname.startsWith("/l/")) {
         const target = u.searchParams.get("uddg");
         return target ? normalizeUrl(target, depth + 1) : "";
@@ -264,7 +266,8 @@ function postProcess(results, query, domains, limit) {
     perDomainLimit,
     domains,
   ).map((result) => {
-    const relevance = relevanceDetails(result, query);
+    const relevanceQuery = result._relevanceQuery || query;
+    const relevance = relevanceDetails(result, relevanceQuery);
     return {
       ...result,
       _score: relevance.score,
@@ -289,7 +292,12 @@ function postProcess(results, query, domains, limit) {
     : 0;
 
   return {
-    results: relevant.map(({ _score, _matches, ...result }) => result),
+    results: relevant.map(({
+      _score,
+      _matches,
+      _relevanceQuery,
+      ...result
+    }) => result),
     quality: {
       top_score: Number(topScore.toFixed(3)),
       average_top3: Number(avgTop3.toFixed(3)),
@@ -333,19 +341,80 @@ function buildMarketFallbackQuery(query, mode, market, domains = []) {
   return (query.trim() + " " + hint + domainClause(domains)).slice(0, 1000);
 }
 
-async function fetchText(url, init = {}) {
-  const res = await fetch(url, {
-    redirect: "follow",
-    ...init,
-    headers: {
-      "User-Agent": UA,
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
-      "Accept-Language": "en-US,en;q=0.8,ar;q=0.5",
-      ...(init.headers || {}),
-    },
-  });
-  if (!res.ok) throw new Error("HTTP " + res.status + " from " + new URL(url).hostname);
-  return await res.text();
+async function readTextLimited(response, maxBytes) {
+  const declared = Number(response.headers.get("content-length") || "0");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error("Provider response exceeded " + maxBytes + " bytes.");
+  }
+
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      throw new Error("Provider response exceeded " + maxBytes + " bytes.");
+    }
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new Error("Provider response exceeded " + maxBytes + " bytes.");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+
+  text += decoder.decode();
+  return text;
+}
+
+async function fetchText(url, init = {}, limits = {}) {
+  const timeoutMs = Math.max(
+    100,
+    Number(limits.timeoutMs) || PROVIDER_TIMEOUT_MS,
+  );
+  const maxBytes = Math.max(
+    1024,
+    Number(limits.maxBytes) || MAX_PROVIDER_RESPONSE_BYTES,
+  );
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      ...init,
+      signal: controller.signal,
+      headers: {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        "Accept-Language": "en-US,en;q=0.8,ar;q=0.5",
+        ...(init.headers || {}),
+      },
+    });
+    if (!res.ok) {
+      throw new Error(
+        "HTTP " + res.status + " from " + new URL(url).hostname,
+      );
+    }
+    return await readTextLimited(res, maxBytes);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(
+        "Timed out after " + timeoutMs + " ms from " + new URL(url).hostname,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function searchDuckDuckGo(query, limit) {
@@ -369,6 +438,9 @@ async function searchDuckDuckGo(query, limit) {
     if (results.length >= limit) break;
   }
 
+  if (!results.length && /result__a|result__snippet/i.test(html)) {
+    throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
+  }
   return results;
 }
 
@@ -472,6 +544,9 @@ async function searchBingHtml(query, limit, market) {
     if (results.length >= limit) break;
   }
 
+  if (!results.length && /\bb_algo\b/i.test(html)) {
+    throw new Error("Bing parser found result markup but parsed zero results.");
+  }
   return results;
 }
 
@@ -615,7 +690,15 @@ export async function searchWeb(env, {
     ], errors, "free-fallback");
     if (fallbackResults.length) {
       rawResults.push(...fallbackResults);
-      fallbacksUsed.push("duckduckgo-lite", "bing-html");
+      const fallbackSources = new Set(
+        fallbackResults.map((result) => result.source),
+      );
+      if (fallbackSources.has("duckduckgo-lite")) {
+        fallbacksUsed.push("duckduckgo-lite");
+      }
+      if (fallbackSources.has("bing-html")) {
+        fallbacksUsed.push("bing-html");
+      }
       processed = postProcess(rawResults, query, domains, n);
     }
   }
@@ -632,9 +715,14 @@ export async function searchWeb(env, {
       "market-fallback",
     );
 
+    searchQueries.push(marketQuery);
     if (marketResults.length) {
-      rawResults.push(...marketResults);
-      searchQueries.push(marketQuery);
+      rawResults.push(
+        ...marketResults.map((result) => ({
+          ...result,
+          _relevanceQuery: marketQuery,
+        })),
+      );
       fallbacksUsed.push("market-localized");
       processed = postProcess(rawResults, query, domains, n);
     }
@@ -644,13 +732,20 @@ export async function searchWeb(env, {
     try {
       const premium = await cloudflareSearch(env, q, "ceramic", n * 2);
       processed = postProcess([...rawResults, ...premium], query, domains, n);
+      const recovered = !lowQuality();
       return {
         query: q,
         search_queries: searchQueries,
         backend: "auto:free+cloudflare-ceramic",
         paid_fallback_used: true,
         fallbacks_used: [...new Set(fallbacksUsed)],
-        auto: { escalated: true, reason: "paid_fallback_used" },
+        auto: {
+          escalated: true,
+          recovered,
+          reason: recovered
+            ? "paid_fallback_recovered"
+            : "paid_fallback_exhausted",
+        },
         quality: processed.quality,
         errors,
         results: processed.results,
@@ -877,6 +972,7 @@ export async function githubSearch(env, {
 
 export const __test = {
   buildMarketFallbackQuery,
+  fetchText,
   decodeBingTarget,
   normalizeUrl,
   matchesDomains,
