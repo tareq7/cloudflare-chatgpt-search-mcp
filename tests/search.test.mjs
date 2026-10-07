@@ -108,7 +108,7 @@ test("relevance gate rejects the unrelated benchmark failure classes", () => {
   }
 });
 
-test("free supplier search merges DDG with direct Bing RSS URLs", async () => {
+test("optional Bing RSS merges direct destinations without bing.com redirects", async () => {
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
 
@@ -144,7 +144,7 @@ test("free supplier search merges DDG with direct Bing RSS URLs", async () => {
   };
 
   const result = await searchWeb(
-    { ALLOW_PAID_WEBSEARCH: "0" },
+    { ALLOW_PAID_WEBSEARCH: "0", ENABLE_BING_RSS: "1" },
     {
       query: "no-drill C-clamp TV anti-tip straps",
       mode: "supplier",
@@ -159,6 +159,54 @@ test("free supplier search merges DDG with direct Bing RSS URLs", async () => {
     new Set(["noon.com", "amazon.sa"]),
   );
   assert.ok(result.results.every((item) => item.domain !== "bing.com"));
+});
+
+test("Bing web RSS is opt-in and not requested by default", async () => {
+  let rssRequested = false;
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+
+    if (url.hostname === "html.duckduckgo.com") {
+      return ok(
+        ddgResult(
+          "Cloudflare Workers Remote MCP OAuth",
+          "https://developers.cloudflare.com/agents/model-context-protocol/",
+          "Remote MCP OAuth documentation for Cloudflare Workers",
+        ) +
+        ddgResult(
+          "Build a Remote MCP Server on Workers",
+          "https://developers.cloudflare.com/agents/model-context-protocol/guides/remote-mcp-server/",
+          "Cloudflare remote MCP server guide",
+        ) +
+        ddgResult(
+          "Workers OAuth Provider",
+          "https://developers.cloudflare.com/agents/model-context-protocol/authorization/",
+          "OAuth authorization for MCP",
+        ),
+      );
+    }
+
+    if (url.hostname === "www.bing.com" && url.searchParams.get("format") === "rss") {
+      rssRequested = true;
+      return ok("<rss><channel></channel></rss>", "text/xml; charset=utf-8");
+    }
+
+    throw new Error("unexpected URL " + url);
+  };
+
+  const result = await searchWeb(
+    { ALLOW_PAID_WEBSEARCH: "0" },
+    {
+      query: "Cloudflare remote MCP Workers OAuth",
+      mode: "technical",
+      limit: 3,
+      backend: "free",
+    },
+  );
+
+  assert.equal(rssRequested, false);
+  assert.equal(result.results.length, 3);
 });
 
 test("news domains are enforced using publisher metadata", async () => {

@@ -591,10 +591,15 @@ export async function searchWeb(env, {
   const errors = [];
   const fallbacksUsed = [];
   const searchQueries = [q];
-  let rawResults = await collectSearches([
-    searchDuckDuckGo(q, cap),
-    searchBingRss(q, cap, market),
-  ], errors, "primary");
+  const primarySearches = [searchDuckDuckGo(q, cap)];
+  if (env.ENABLE_BING_RSS === "1") {
+    primarySearches.push(searchBingRss(q, cap, market));
+  }
+  let rawResults = await collectSearches(
+    primarySearches,
+    errors,
+    "primary",
+  );
 
   let processed = postProcess(rawResults, query, domains, n);
   const minimumUseful = Math.min(3, n);
@@ -617,10 +622,15 @@ export async function searchWeb(env, {
 
   const marketQuery = buildMarketFallbackQuery(query, mode, market, domains);
   if (lowQuality() && marketQuery && marketQuery !== q) {
-    const marketResults = await collectSearches([
-      searchDuckDuckGo(marketQuery, cap),
-      searchBingRss(marketQuery, cap, market),
-    ], errors, "market-fallback");
+    const marketSearches = [searchDuckDuckGo(marketQuery, cap)];
+    if (env.ENABLE_BING_RSS === "1") {
+      marketSearches.push(searchBingRss(marketQuery, cap, market));
+    }
+    const marketResults = await collectSearches(
+      marketSearches,
+      errors,
+      "market-fallback",
+    );
 
     if (marketResults.length) {
       rawResults.push(...marketResults);
