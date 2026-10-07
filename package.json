@@ -1,0 +1,21 @@
+{
+  "name": "cloudflare-chatgpt-search-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare-hosted remote search MCP for ChatGPT",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --remote",
+    "check": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.1",
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "^0.26.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "wrangler": "^4.148.0"
+  }
+}
