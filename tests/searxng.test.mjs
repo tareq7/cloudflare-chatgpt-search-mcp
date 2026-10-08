@@ -57,6 +57,7 @@ test("rejects invalid JSON response and oversized response",async()=>{
     ()=>searchSearxng({SEARXNG_URL:"https://search.example.org"},{query:"clamp",market:"SA",mode:"web",limit:3}),
     /JSON|content-type/i
   );
+  __clearSearxngCooldownsForTests();
   globalThis.fetch=async()=>new Response("x",{headers:{"content-type":"application/json","content-length":"10000000"}});
   await assert.rejects(
     ()=>searchSearxng({SEARXNG_URL:"https://search.example.org"},{query:"clamp",market:"SA",mode:"web",limit:3}),
