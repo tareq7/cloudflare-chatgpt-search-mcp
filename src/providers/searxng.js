@@ -53,13 +53,17 @@ function validateEndpoint(raw) {
   ) {
     throw new Error("SearXNG requires a public HTTPS hostname without URL credentials or private addresses.");
   }
-  const root = new URL(url.pathname.endsWith("/") ? url.href : url.href + "/");
-  return { origin: url.origin, url: new URL("search", root) };
+  const cleanPath = url.pathname.replace(/\/+$/, "");
+  const searchPath = cleanPath.endsWith("/search") ? cleanPath : (cleanPath + "/search");
+  const searchUrl = new URL(searchPath, url.origin);
+  return { origin: url.origin, url: searchUrl };
 }
 
 export function configuredSearxngEndpoints(env = {}) {
   const raw = [];
   if (env.SEARXNG_URL) raw.push(String(env.SEARXNG_URL).trim());
+  if (env.SEARXNG_DEFAULT_URL) raw.push(String(env.SEARXNG_DEFAULT_URL).trim());
+  if (env.DEFAULT_SEARXNG_URL) raw.push(String(env.DEFAULT_SEARXNG_URL).trim());
   if (env.SEARXNG_URLS) {
     raw.push(...String(env.SEARXNG_URLS).split(/[\n,;]+/).map(s => s.trim()));
   }
@@ -76,8 +80,11 @@ export function configuredSearxngEndpoints(env = {}) {
   if (!endpoints.length) {
     throw new Error("SEARXNG_URL or SEARXNG_URLS is not configured.");
   }
-  if (env.SEARXNG_BEARER_TOKEN && !env.SEARXNG_URL) {
-    throw new Error("SEARXNG_BEARER_TOKEN requires a primary SEARXNG_URL so it cannot leak to backup hosts.");
+  const primaryUrl = [env.SEARXNG_URL, env.SEARXNG_DEFAULT_URL, env.DEFAULT_SEARXNG_URL]
+    .map((s) => s && String(s).trim())
+    .find(Boolean) || null;
+  if ((env.SEARXNG_BEARER_TOKEN || env.SEARXNG_API_KEY) && !primaryUrl) {
+    throw new Error("SEARXNG_BEARER_TOKEN or SEARXNG_API_KEY requires a primary SEARXNG_URL so it cannot leak to backup hosts.");
   }
   const allowedHtmlOrigins = new Set();
   if (env.SEARXNG_HTML_ORIGINS) {
@@ -103,6 +110,13 @@ async function readBodyLimited(res, controller, format = "json") {
   if (!res.ok) {
     const error = new Error("SearXNG HTTP " + res.status);
     error.status = res.status;
+    const rateLimitReset = res.headers.get("x-ratelimit-reset");
+    const retryAfter = res.headers.get("retry-after") || rateLimitReset;
+    if (retryAfter) error.retryAfter = retryAfter;
+    const rateLimitRemaining = res.headers.get("x-ratelimit-remaining");
+    if (rateLimitRemaining !== null) error.rateLimitRemaining = rateLimitRemaining;
+    const rateLimitLimit = res.headers.get("x-ratelimit-limit");
+    if (rateLimitLimit !== null) error.rateLimitLimit = rateLimitLimit;
     throw error;
   }
   if (!(res.headers.get("content-type") || "").toLowerCase().includes(
@@ -147,8 +161,36 @@ async function readBodyLimited(res, controller, format = "json") {
   return new TextDecoder().decode(result);
 }
 
+function parseRetryAfterMs(header) {
+  if (!header) return null;
+  const str = String(header).trim();
+  const num = Number(str);
+  if (Number.isFinite(num) && num >= 0) {
+    if (num > 1_000_000_000) {
+      const diff = (num * 1000) - Date.now();
+      return Math.max(0, Math.min(diff, 24 * 60 * 60_000));
+    }
+    return Math.min(num * 1000, 24 * 60 * 60_000);
+  }
+  const dateMs = Date.parse(str);
+  if (Number.isFinite(dateMs)) {
+    const diff = dateMs - Date.now();
+    return Math.max(0, Math.min(diff, 24 * 60 * 60_000));
+  }
+  return null;
+}
+
+function isPrivAuEndpoint(endpoint) {
+  const host = endpoint?.url?.hostname?.toLowerCase() || "";
+  return host === "priv.au" || host.endsWith(".priv.au");
+}
+
 function errorLabel(error) {
-  if (error?.status) return "HTTP " + error.status;
+  if (error?.status) {
+    let label = "HTTP " + error.status;
+    if (error.retryAfter) label += " (retry-after " + error.retryAfter + ")";
+    return label;
+  }
   if (error?.name === "AbortError" || error?.name === "TimeoutError") return "timeout";
   if (error instanceof SyntaxError) return "invalid JSON";
   return String(error?.message || error).slice(0, 150);
@@ -159,7 +201,7 @@ function cooldown(origin, ms) {
   cooldowns.set(origin, Date.now() + ms);
 }
 
-async function searchOne(env, endpoint, args, authOrigin, timeoutMs) {
+async function searchOne(env, endpoint, args, authOrigin, timeoutMs, diagnostics) {
   const url = new URL(endpoint.url);
   url.searchParams.set("q", String(args.query).slice(0, 1000));
   const format = endpoint.format || "json";
@@ -168,9 +210,27 @@ async function searchOne(env, endpoint, args, authOrigin, timeoutMs) {
   url.searchParams.set("language", LANGUAGES[args.market] || LANGUAGES.global);
   url.searchParams.set("safesearch", "0");
 
-  const headers = { Accept: format === "html" ? "text/html" : "application/json" };
-  if (env.SEARXNG_BEARER_TOKEN && endpoint.origin === authOrigin) {
-    headers.Authorization = "Bearer " + env.SEARXNG_BEARER_TOKEN;
+  const headers = {
+    Accept: format === "html" ? "text/html" : "application/json",
+    "User-Agent": "CloudflareSearchMCP/1.0",
+  };
+  if (endpoint.origin === authOrigin) {
+    if (env.SEARXNG_BEARER_TOKEN) {
+      headers.Authorization = "Bearer " + env.SEARXNG_BEARER_TOKEN;
+    }
+    if (env.SEARXNG_API_KEY) {
+      headers["X-API-Key"] = env.SEARXNG_API_KEY;
+      if (!headers.Authorization) {
+        headers.Authorization = "Bearer " + env.SEARXNG_API_KEY;
+      }
+    }
+    if (
+      env.SEARXNG_BEARER_TOKEN &&
+      !headers["X-API-Key"] &&
+      isPrivAuEndpoint(endpoint)
+    ) {
+      headers["X-API-Key"] = env.SEARXNG_BEARER_TOKEN;
+    }
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -178,9 +238,28 @@ async function searchOne(env, endpoint, args, authOrigin, timeoutMs) {
     const response = await fetch(url, {
       method: "GET",
       headers,
-      redirect: "error",
+      redirect: "manual",
       signal: controller.signal,
     });
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error(`SearXNG returned redirect (HTTP ${response.status}).`);
+    }
+    const rateLimitRemaining = response.headers.get("x-ratelimit-remaining");
+    const rateLimitLimit = response.headers.get("x-ratelimit-limit");
+    const rateLimitReset = response.headers.get("x-ratelimit-reset");
+    const retryAfter = response.headers.get("retry-after") || rateLimitReset;
+
+    if (diagnostics) {
+      if (rateLimitRemaining !== null) diagnostics.rateLimitRemaining = rateLimitRemaining;
+      if (rateLimitLimit !== null) diagnostics.rateLimitLimit = rateLimitLimit;
+    }
+
+    if (rateLimitRemaining === "0") {
+      const parsed = parseRetryAfterMs(retryAfter);
+      const resetMs = parsed !== null ? Math.max(1000, parsed) : COOLDOWN_MS;
+      cooldown(endpoint.origin, resetMs);
+    }
+
     const body = await readBodyLimited(response, controller, format);
     if (format === "html") {
       return parseSearxngHtml(body, {
@@ -225,7 +304,10 @@ export async function searchSearxng(env, {
   diagnostics,
 } = {}) {
   const endpoints = configuredSearxngEndpoints(env);
-  const authOrigin = env.SEARXNG_URL ? validateEndpoint(env.SEARXNG_URL).origin : null;
+  const primaryUrl = [env.SEARXNG_URL, env.SEARXNG_DEFAULT_URL, env.DEFAULT_SEARXNG_URL]
+    .map((s) => s && String(s).trim())
+    .find(Boolean) || null;
+  const authOrigin = primaryUrl ? validateEndpoint(primaryUrl).origin : null;
   const attempts = Math.max(1, Math.min(
     Number(env.SEARXNG_MAX_ATTEMPTS) || 2, MAX_ATTEMPTS,
   ));
@@ -245,7 +327,7 @@ export async function searchSearxng(env, {
     diagnostics?.attempted?.push(endpoint.origin);
     try {
       const results = await searchOne(
-        env, endpoint, { query, market, mode, limit }, authOrigin, timeoutMs,
+        env, endpoint, { query, market, mode, limit }, authOrigin, timeoutMs, diagnostics,
       );
       if (results.length && (!isUseful || isUseful(results))) {
         if (diagnostics) diagnostics.selected = endpoint.origin;
@@ -257,7 +339,23 @@ export async function searchSearxng(env, {
     } catch (error) {
       failures.push(endpoint.origin + ": " + errorLabel(error));
       if ([401, 403, 429].includes(error?.status)) {
-        cooldown(endpoint.origin, DENIAL_COOLDOWN_MS);
+        let cooldownDuration = DENIAL_COOLDOWN_MS;
+        if (error.status === 429) {
+          if (error.retryAfter) {
+            const parsed = parseRetryAfterMs(error.retryAfter);
+            if (parsed !== null) {
+              cooldownDuration = Math.max(1000, parsed);
+            } else {
+              cooldownDuration = COOLDOWN_MS;
+            }
+          } else {
+            cooldownDuration = COOLDOWN_MS;
+          }
+        }
+        cooldown(endpoint.origin, cooldownDuration);
+        if (diagnostics && error.retryAfter) {
+          diagnostics.retryAfter = error.retryAfter;
+        }
         // Never move to another public host to circumvent a denial/rate limit.
         throw new Error("SearXNG access or rate-limit denial: " + failures.at(-1));
       }
@@ -270,4 +368,8 @@ export async function searchSearxng(env, {
 // Exposed only to regression tests so cooldowns do not leak between tests.
 export function __clearSearxngCooldownsForTests() {
   cooldowns.clear();
+}
+
+export function __getSearxngCooldownForTests(origin) {
+  return cooldowns.get(origin) || 0;
 }

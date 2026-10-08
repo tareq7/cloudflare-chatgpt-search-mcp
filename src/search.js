@@ -1,4 +1,6 @@
 import { searchSearxng } from "./providers/searxng.js";
+import { searchBrave } from "./providers/brave.js";
+import { searchExa } from "./providers/exa.js";
 import { parseSearchRss } from "./parsers/rss.js";
 import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
 
@@ -119,6 +121,13 @@ function normalizeUrl(raw, depth = 0) {
         return target ? normalizeUrl(target, depth + 1) : "";
       }
       return "";
+    }
+
+    if (host === "google.com" || host.endsWith(".google.com")) {
+      if (u.pathname === "/url") {
+        const target = u.searchParams.get("q") || u.searchParams.get("url");
+        return target ? normalizeUrl(target, depth + 1) : "";
+      }
     }
 
     u.hash = "";
@@ -572,7 +581,9 @@ export async function searchWeb(env, {
   const cap = Math.min(n * 2, 20);
   const q = buildQuery(query, mode, market, domains);
 
-  const searxngEnabled = Boolean(env.SEARXNG_URL || env.SEARXNG_URLS);
+  const searxngEnabled = Boolean(
+    env.SEARXNG_URL || env.SEARXNG_URLS || env.SEARXNG_DEFAULT_URL || env.DEFAULT_SEARXNG_URL,
+  );
   const searxngDiagnostics = { attempted: [], skipped: [], selected: null };
   const searxngUseful = (items) => {
     const quality = postProcess(items, query, domains, n);
@@ -580,6 +591,37 @@ export async function searchWeb(env, {
       quality.quality.top_score >= 0.34 &&
       quality.quality.average_top3 >= 0.22;
   };
+
+  const braveEnabled = Boolean(env.BRAVE_API_KEY || env.BRAVE_SEARCH_API_KEY);
+  const exaEnabled = Boolean(env.EXA_API_KEY || env.EXA_SEARCH_API_KEY);
+
+  if (backend === "exa") {
+    const exaResults = await searchExa(env, {
+      query: q, market, mode, limit: cap, domains,
+    });
+    const matches = postProcess(exaResults, query, domains, n);
+    return {
+      query: q,
+      search_queries: [q],
+      backend: "exa",
+      quality: matches.quality,
+      results: matches.results,
+    };
+  }
+
+  if (backend === "brave") {
+    const braveResults = await searchBrave(env, {
+      query: q, market, limit: cap,
+    });
+    const matches = postProcess(braveResults, query, domains, n);
+    return {
+      query: q,
+      search_queries: [q],
+      backend: "brave",
+      quality: matches.quality,
+      results: matches.results,
+    };
+  }
 
   if (backend === "searxng") {
     const matches = postProcess(
@@ -601,6 +643,25 @@ export async function searchWeb(env, {
 
   if (mode === "news") {
     const news = await searchNews(q, query, n, market, domains);
+    if ((!news.results || news.results.length === 0) && exaEnabled) {
+      try {
+        const exaNews = await searchExa(env, {
+          query: q, market, mode: "news", limit: cap, domains,
+        });
+        const matches = postProcess(exaNews, query, domains, n);
+        if (matches.results.length > 0) {
+          return {
+            query: q,
+            search_queries: [q],
+            backend: "free-news-rss+exa",
+            quality: matches.quality,
+            results: matches.results,
+          };
+        }
+      } catch {
+        // Fall back to RSS output if Exa encounters an issue
+      }
+    }
     return {
       query: q,
       search_queries: [q],
@@ -641,13 +702,19 @@ export async function searchWeb(env, {
   const fallbacksAttempted = [];
   const searchQueries = [q];
   const hasSearxng = searxngEnabled;
+  const ranExaPrimary = !hasSearxng && exaEnabled;
+  const ranBravePrimary = !hasSearxng && !exaEnabled && braveEnabled;
   const primarySearches = hasSearxng
     ? [searchSearxng(env, {
         query: q, market, mode, limit: cap,
         isUseful: searxngUseful, diagnostics: searxngDiagnostics,
       })]
-    : [searchDuckDuckGo(q, cap)];
-  if (!hasSearxng && env.ENABLE_BING_RSS === "1") {
+    : (ranExaPrimary
+      ? [searchExa(env, { query: q, market, mode, limit: cap, domains })]
+      : (ranBravePrimary
+        ? [searchBrave(env, { query: q, market, limit: cap })]
+        : [searchDuckDuckGo(q, cap)]));
+  if (!hasSearxng && !exaEnabled && !braveEnabled && env.ENABLE_BING_RSS === "1") {
     primarySearches.push(searchBingRss(q, cap, market));
   }
   let rawResults = await collectSearches(
@@ -663,11 +730,37 @@ export async function searchWeb(env, {
     processed.quality.top_score < 0.34 ||
     processed.quality.average_top3 < 0.22;
 
-  // Keep established free providers as a fallback if the self-hosted instance is unhealthy.
-  if (hasSearxng && lowQuality()) {
+  // If upstream primary returned low quality, try Exa before falling back to scrapers.
+  if (lowQuality() && exaEnabled && !ranExaPrimary) {
+    fallbacksAttempted.push("exa");
+    const exaFallback = await collectSearches(
+      [searchExa(env, { query: q, market, mode, limit: cap, domains })], errors, "exa-fallback",
+    );
+    if (exaFallback.length) {
+      rawResults.push(...exaFallback);
+      fallbacksUsed.push("exa");
+      processed = postProcess(rawResults, query, domains, n);
+    }
+  }
+
+  // If still low quality, try Brave before falling back to scrapers.
+  if (lowQuality() && braveEnabled && !ranBravePrimary) {
+    fallbacksAttempted.push("brave");
+    const braveFallback = await collectSearches(
+      [searchBrave(env, { query: q, market, limit: cap })], errors, "brave-fallback",
+    );
+    if (braveFallback.length) {
+      rawResults.push(...braveFallback);
+      fallbacksUsed.push("brave");
+      processed = postProcess(rawResults, query, domains, n);
+    }
+  }
+
+  // Keep established free providers as a fallback if upstream search is unhealthy or low quality.
+  if ((hasSearxng || ranExaPrimary || ranBravePrimary) && lowQuality()) {
     fallbacksAttempted.push("duckduckgo");
     const ddg = await collectSearches(
-      [searchDuckDuckGo(q, cap)], errors, "searxng-fallback",
+      [searchDuckDuckGo(q, cap)], errors, "upstream-fallback",
     );
     if (ddg.length) {
       rawResults.push(...ddg);
@@ -762,8 +855,8 @@ export async function searchWeb(env, {
     backend: backend === "auto" && uniqueAttempts.length
       ? "auto:free-fallbacks"
       : backend === "auto"
-        ? hasSearxng ? "auto:searxng" : "auto:free"
-        : hasSearxng ? "free:searxng" : "free",
+        ? hasSearxng ? "auto:searxng" : ranExaPrimary ? "auto:exa" : ranBravePrimary ? "auto:brave" : "auto:free"
+        : hasSearxng ? "free:searxng" : ranExaPrimary ? "free:exa" : ranBravePrimary ? "free:brave" : "free",
     fallbacks_used: uniqueFallbacks,
     fallbacks_attempted: uniqueAttempts,
     ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
@@ -801,10 +894,10 @@ export async function multiSearch(env, {
     mode,
     market,
     limit: Math.max(1, Math.min(Number(limit_per_query) || 6, 10)),
-    backend: "free",
+    backend: "auto",
   });
   const responses = [];
-  if (env.SEARXNG_URL || env.SEARXNG_URLS) {
+  if (env.SEARXNG_URL || env.SEARXNG_URLS || env.SEARXNG_DEFAULT_URL || env.DEFAULT_SEARXNG_URL) {
     for (const query of list) responses.push(await runOne(query));
   } else {
     responses.push(...await Promise.all(list.map(runOne)));
@@ -984,4 +1077,6 @@ export const __test = {
   matchesDomains,
   relevanceDetails,
   postProcess,
+  searchBrave,
+  searchExa,
 };

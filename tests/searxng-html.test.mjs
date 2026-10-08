@@ -65,7 +65,7 @@ test("explicit HTML mode sends only one query request without JSON, CSS, stealth
   assert.equal(calls.length,1);
   assert.equal(new URL(calls[0].url).searchParams.get("format"),null);
   assert.equal(calls[0].accept,"text/html");
-  assert.equal(calls[0].redirect,"error");
+  assert.equal(calls[0].redirect,"manual");
   assert.equal(results[0].source_instance,"https://search.example.org");
 });
 
