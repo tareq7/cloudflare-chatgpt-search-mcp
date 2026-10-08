@@ -220,8 +220,9 @@ export async function searchSearxng(env, {
         if (diagnostics) diagnostics.selected = endpoint.origin;
         return results;
       }
+      // A valid response can be irrelevant to one niche or domain-restricted query.
+      // Do not penalize the host for future unrelated searches.
       failures.push(endpoint.origin + ": empty or low-relevance results");
-      cooldown(endpoint.origin, COOLDOWN_MS);
     } catch (error) {
       failures.push(endpoint.origin + ": " + errorLabel(error));
       if ([401, 403, 429].includes(error?.status)) {

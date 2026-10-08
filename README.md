@@ -184,24 +184,24 @@ The optional SearXNG provider supports an **explicitly configured, sequential fa
 
 Configuration (set Worker variables/secrets through your Cloudflare environment, never in Git):
 
-\`\`\`text
+```text
 SEARXNG_URL=https://approved-primary.example.org
 SEARXNG_URLS=https://approved-backup-1.example.org,https://approved-backup-2.example.org
 SEARXNG_MAX_ATTEMPTS=2
 SEARXNG_TIMEOUT_MS=5500
-\`\`\`
+```
 
-\`SEARXNG_URL\` is the first instance. \`SEARXNG_URLS\` appends additional instances; duplicates are discarded. The chain attempts a maximum of **two** instances per search by default, with a hard maximum of three. Each attempt has its own bounded timeout and response-size limit. Requests are serial, and the \`multi_search\` MCP tool runs queries serially whenever a SearXNG backend is configured to reduce load on public instances.
+`SEARXNG_URL` is the first instance. `SEARXNG_URLS` appends additional instances; duplicates are discarded. The chain attempts a maximum of **two** instances per search by default, with a hard maximum of three. Each attempt has its own bounded timeout and response-size limit. Requests are serial, and the `multi_search` MCP tool runs queries serially whenever a SearXNG backend is configured to reduce load on public instances.
 
-The chain accepts **only HTTPS public hostnames**. If the primary requires a bearer token, save it as the Worker secret \`SEARXNG_BEARER_TOKEN\`; it is sent **only to the primary's origin**, never to backups. All target instances must independently allow your planned personal JSON API use. In particular, [priv.au's personal-use API](https://priv.au/api) requires **an operator-issued API key**; visiting the site without a key is not enough.
+The chain accepts **only HTTPS public hostnames**. If the primary requires a bearer token, save it as the Worker secret `SEARXNG_BEARER_TOKEN`; it is sent **only to the primary's origin**, never to backups. All target instances must independently allow your planned personal JSON API use. In particular, [priv.au's personal-use API](https://priv.au/api) requires **an operator-issued API key**; visiting the site without a key is not enough.
 
 Fallback behavior:
 
 1. A successful JSON response containing results that meet the MCP relevance and domain-filter checks is returned immediately.
-2. Timeout, 5xx, invalid JSON, or empty/low-quality results temporarily cool down that instance and allow the **next explicitly approved** instance, within the attempt limit.
+2. Timeout, 5xx, and invalid JSON temporarily cool down the affected instance. Empty or low-relevance results may try the next approved instance **without** marking the current host unhealthy.
 3. HTTP **401, 403 or 429** stops the public-instance chain immediately; it never switches to another public host to work around an API denial or quota.
 4. If all approved hosts are unavailable, the MCP's existing DuckDuckGo/Bing retrieval paths remain available for best-effort fallback.
-5. Results include \`searxng_chain\` diagnostics showing attempted/skipped/selected **host origins only** (not bearer credentials or request URLs).
+5. Results include `searxng_chain` diagnostics showing attempted/skipped/selected **host origins only** (not bearer credentials or request URLs).
 
 The host cooldown is best-effort within a Cloudflare isolate; it is **not** a globally consistent distributed rate limiter. Do not configure public hosts for production unless their policies authorize automated API queries and the JSON response has been verified from the Worker runtime.
 

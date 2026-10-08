@@ -506,11 +506,17 @@ async function searchNews(searchQuery, relevanceQuery, limit, market, domains = 
   ]);
 
   const out = [];
-  if (google.status === "fulfilled") {
-    out.push(...parseRss(google.value, "google-news-rss", limit * 2));
-  }
-  if (bing.status === "fulfilled") {
-    out.push(...parseRss(bing.value, "bing-news-rss", limit * 2));
+  for (const [settled, source] of [
+    [google, "google-news-rss"],
+    [bing, "bing-news-rss"],
+  ]) {
+    if (settled.status !== "fulfilled") continue;
+    try {
+      out.push(...parseRss(settled.value, source, limit * 2));
+    } catch {
+      // A blocked, truncated, or malformed feed should never discard the
+      // independent provider's valid news results.
+    }
   }
 
   return postProcess(out, relevanceQuery, domains, limit);

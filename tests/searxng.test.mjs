@@ -198,3 +198,26 @@ test("empty first-instance results fall back without concurrent fanout",async()=
   assert.deepEqual(calls,["empty.example.org","backup.example.org"]);
   assert.equal(result.length,3);
 });
+
+test("valid but query-irrelevant JSON results do not cool down a healthy host",async()=>{
+  __clearSearxngCooldownsForTests();
+  const previous=globalThis.fetch;
+  const calls=[];
+  globalThis.fetch=async(url)=>{
+    calls.push(new URL(url).hostname);
+    return Response.json(sample());
+  };
+  try {
+    const env={SEARXNG_URL:"https://healthy.example.org"};
+    await assert.rejects(
+      ()=>searchSearxng(env,{query:"unrelated niche search",limit:3,isUseful:()=>false}),
+      /low-relevance|unavailable/i
+    );
+    const result=await searchSearxng(env,{query:"TV straps",limit:3});
+    assert.equal(result.length,3);
+    assert.deepEqual(calls,["healthy.example.org","healthy.example.org"]);
+  } finally {
+    globalThis.fetch=previous;
+    __clearSearxngCooldownsForTests();
+  }
+});
