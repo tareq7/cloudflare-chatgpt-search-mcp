@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { searchSearxng } from "../src/providers/searxng.js";
+import { searchSearxng, configuredSearxngEndpoints, __clearSearxngCooldownsForTests } from "../src/providers/searxng.js";
 import { searchWeb } from "../src/search.js";
 
 const originalFetch = globalThis.fetch;
-test.afterEach(() => { globalThis.fetch = originalFetch; });
+test.afterEach(() => { globalThis.fetch = originalFetch; __clearSearxngCooldownsForTests(); });
 
 function sample() {
   return {
@@ -106,4 +106,94 @@ test("explicit SearXNG backend reports missing configuration instead of pretendi
     ()=>searchWeb({}, {query:"TV safety straps",mode:"web",backend:"searxng"}),
     /SEARXNG_URL|not configured/i
   );
+});
+
+
+test("serial failover tries the second configured host after a genuine outage", async()=>{
+  const calls=[];
+  globalThis.fetch=async(url)=>{
+    const host=new URL(url).hostname;
+    calls.push(host);
+    if(host==="failed.example.org")return new Response("unavailable",{status:503});
+    if(host==="backup.example.org")return Response.json(sample());
+    throw new Error("unexpected host "+host);
+  };
+  const diagnostic={attempted:[],skipped:[],selected:null};
+  const matches=await searchSearxng(
+    {SEARXNG_URLS:"https://failed.example.org, https://backup.example.org",SEARXNG_MAX_ATTEMPTS:"2"},
+    {query:"C clamp TV anti tip straps",market:"SA",limit:3,diagnostics:diagnostic}
+  );
+  assert.deepEqual(calls,["failed.example.org","backup.example.org"]);
+  assert.equal(matches.length,3);
+  assert.equal(diagnostic.selected,"https://backup.example.org");
+  assert.deepEqual(diagnostic.attempted,["https://failed.example.org","https://backup.example.org"]);
+});
+
+test("public API denial or rate-limit stops instance rotation", async()=>{
+  for(const status of [401,403,429]){
+    __clearSearxngCooldownsForTests();
+    const calls=[];
+    globalThis.fetch=async(url)=>{
+      calls.push(new URL(url).hostname);
+      return new Response("request denied",{status});
+    };
+    await assert.rejects(
+      ()=>searchSearxng(
+        {SEARXNG_URLS:"https://restricted.example.org,https://backup.example.org",SEARXNG_MAX_ATTEMPTS:"3"},
+        {query:"C clamp TV straps",market:"SA",limit:3}
+      ),
+      /access or rate-limit denial/i
+    );
+    assert.deepEqual(calls,["restricted.example.org"],"did not retry on "+status);
+  }
+});
+
+test("private bearer secret stays exclusively on the primary origin",async()=>{
+  const headers=[];
+  globalThis.fetch=async(url,opts)=>{
+    const host=new URL(url).hostname;
+    headers.push({host,authorization:opts.headers.Authorization});
+    if(host==="primary.example.org")return new Response("unavailable",{status:503});
+    return Response.json(sample());
+  };
+  const results=await searchSearxng(
+    {SEARXNG_URL:"https://primary.example.org",SEARXNG_URLS:"https://backup.example.org",SEARXNG_BEARER_TOKEN:"top-secret",SEARXNG_MAX_ATTEMPTS:"2"},
+    {query:"C clamp TV straps",limit:3}
+  );
+  assert.equal(results.length,3);
+  assert.deepEqual(headers,[
+    {host:"primary.example.org",authorization:"Bearer top-secret"},
+    {host:"backup.example.org",authorization:undefined},
+  ]);
+  assert.ok(!JSON.stringify(results).includes("top-secret"));
+});
+
+test("configured chain rejects insecure or duplicate-host secrets and caps candidate URLs",()=>{
+  assert.deepEqual(
+    configuredSearxngEndpoints({SEARXNG_URLS:"https://good.example.org, https://good.example.org; https://backup.example.org"}).map(x=>x.origin),
+    ["https://good.example.org","https://backup.example.org"]
+  );
+  assert.throws(
+    ()=>configuredSearxngEndpoints({SEARXNG_URLS:"https://good.example.org",SEARXNG_BEARER_TOKEN:"secret"}),
+    /requires a primary/i
+  );
+  for (const raw of ["https://localhost", "https://192.168.1.1", "http://good.example.org", "https://user:pass@good.example.org"]) {
+    assert.throws(()=>configuredSearxngEndpoints({SEARXNG_URLS:raw}),/public HTTPS/i);
+  }
+});
+
+test("empty first-instance results fall back without concurrent fanout",async()=>{
+  const calls=[];
+  globalThis.fetch=async(url)=>{
+    const host=new URL(url).hostname;
+    calls.push(host);
+    if(host==="empty.example.org")return Response.json({results:[]});
+    return Response.json(sample());
+  };
+  const result=await searchSearxng(
+    {SEARXNG_URLS:"https://empty.example.org,https://backup.example.org",SEARXNG_MAX_ATTEMPTS:"2"},
+    {query:"TV C clamp straps",market:"SA",limit:3}
+  );
+  assert.deepEqual(calls,["empty.example.org","backup.example.org"]);
+  assert.equal(result.length,3);
 });
