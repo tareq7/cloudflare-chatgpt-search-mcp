@@ -1,0 +1,58 @@
+name: One-time public SearXNG capability check
+on:
+  push:
+    branches: [feat/searxng-open-source-search]
+    paths:
+      - .github/workflows/verify-public-searxng.yml
+permissions:
+  contents: read
+jobs:
+  json-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: One small request per candidate, no retries
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const hosts = [
+            'https://searx.ononoki.org',
+            'https://search.pereira.is',
+            'https://search.inetol.net',
+            'https://searx.tiekoetter.com',
+            'https://baresearch.org',
+            'https://www.isci.si',
+            'https://searxng.site',
+          ];
+          for (const host of hosts) {
+            const url = host + '/search?q=' + encodeURIComponent('SearXNG API capability check') + '&format=json';
+            const start = Date.now();
+            try {
+              const res = await fetch(url, {
+                headers: { Accept: 'application/json', 'User-Agent': 'CloudflareSearchMCP-evaluation/1.0 (https://github.com/tareq7/cloudflare-chatgpt-search-mcp)' },
+                redirect: 'manual',
+                signal: AbortSignal.timeout(6500),
+              });
+              const kind=(res.headers.get('content-type')||'').split(';')[0];
+              const bytes = Number(res.headers.get('content-length')||0);
+              let count = null;
+              if (res.ok && kind.includes('json') && bytes < 500000) {
+                const body = await res.text();
+                if (body.length < 500000) {
+                  try { count = JSON.parse(body).results?.length ?? null; } catch {}
+                }
+              } else {
+                await res.body?.cancel();
+              }
+              console.log(JSON.stringify({host,status:res.status,type:kind,count,elapsed_ms:Date.now()-start,restricted:res.status===401||res.status===403||res.status===429}));
+            } catch(e) {
+              console.log(JSON.stringify({host,error:e.name==='TimeoutError'?'timeout':String(e.message).slice(0,120),elapsed_ms:Date.now()-start}));
+            }
+          }
+          NODE
