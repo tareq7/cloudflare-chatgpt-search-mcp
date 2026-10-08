@@ -210,3 +210,19 @@ The host cooldown is best-effort within a Cloudflare isolate; it is **not** a gl
 SearXNG directory: [searx.space](https://searx.space/). The directory measures **web search**, not authorization or JSON availability. Do not equate a 100% directory availability score with a usable search API.
 
 **Important:** In the October 8, 2026 one-request-per-host GitHub Actions checks, all initially selected public instances returned HTML, HTTP 403, or HTTP 429 instead of JSON. The repository intentionally ships with **no public hostnames enabled by default**. This keeps hosting free and avoids changing production behavior before operator permission is secured.
+
+### Opt-in SearXNG HTML extraction
+
+For a SearXNG operator who **explicitly permits your personal automated HTML searches** but does not offer JSON output, the Worker can parse the ordinary SearXNG HTML results page. The approach is adapted from the MIT-licensed [pwilkin/mcp-searxng-public](https://github.com/pwilkin/mcp-searxng-public) (copyright Piotr Wilkin, `src/index.ts`). This implementation uses Cheerio instead of regex, validates result links and deduplicates matches. It does not impersonate browsers, warm up CSS, bypass CAPTCHA, or retry denied requests.
+
+The default is **JSON only**. Enable HTML **only for approved, already configured origins**:
+
+```text
+SEARXNG_URL=https://approved-primary.example.org
+SEARXNG_URLS=https://approved-html-backup.example.org
+SEARXNG_HTML_ORIGINS=https://approved-html-backup.example.org
+```
+
+`SEARXNG_HTML_ORIGINS` must contain exact public HTTPS origins from `SEARXNG_URL` or `SEARXNG_URLS`. Selected HTML hosts receive a **single** `GET /search?q=...` request without `format=json`. Other hosts continue using JSON. All results use the existing relevance and domain filters; timeouts, size limits, bounded sequential failover, and secret isolation still apply. **401, 403 and 429 stop the SearXNG chain**, rather than rotating to another public SearXNG host to bypass an access denial.
+
+HTML is not a guaranteed API and may have incomplete metadata. Access remains subject to the operator's rules and `robots.txt`. A browser-search page is **not** permission for automation. No public instances are enabled by default; do not configure hosts from the earlier probes without explicit permission. This optional capability requires no new hosting or paid search.

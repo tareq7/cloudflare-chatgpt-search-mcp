@@ -1,4 +1,6 @@
-// SearXNG JSON transport adapter: https://docs.searxng.org/dev/search_api.html
+// SearXNG JSON/HTML transport adapter: https://docs.searxng.org/dev/search_api.html
+// HTML result extraction is opt-in per explicitly configured operator-approved origin.
+import { parseSearxngHtml } from "../parsers/searxng-html.js";
 // The upstream SearXNG server is AGPL-3.0 and runs independently of this Worker.
 //
 // Public-instance safety:
@@ -77,17 +79,38 @@ export function configuredSearxngEndpoints(env = {}) {
   if (env.SEARXNG_BEARER_TOKEN && !env.SEARXNG_URL) {
     throw new Error("SEARXNG_BEARER_TOKEN requires a primary SEARXNG_URL so it cannot leak to backup hosts.");
   }
+  const allowedHtmlOrigins = new Set();
+  if (env.SEARXNG_HTML_ORIGINS) {
+    const configuredOrigins = new Set(endpoints.map(e => e.origin));
+    for (const rawOrigin of String(env.SEARXNG_HTML_ORIGINS).split(/[\n,;]+/).filter(Boolean)) {
+      const entry = validateEndpoint(rawOrigin.trim());
+      if (entry.url.pathname !== "/search") {
+        throw new Error("SEARXNG_HTML_ORIGINS must contain HTTPS origins without paths.");
+      }
+      if (!configuredOrigins.has(entry.origin)) {
+        throw new Error("SEARXNG_HTML_ORIGINS contains an origin not in SEARXNG_URL or SEARXNG_URLS.");
+      }
+      allowedHtmlOrigins.add(entry.origin);
+    }
+  }
+  for (const endpoint of endpoints) {
+    endpoint.format = allowedHtmlOrigins.has(endpoint.origin) ? "html" : "json";
+  }
   return endpoints;
 }
 
-async function readJsonLimited(res, controller) {
+async function readBodyLimited(res, controller, format = "json") {
   if (!res.ok) {
     const error = new Error("SearXNG HTTP " + res.status);
     error.status = res.status;
     throw error;
   }
-  if (!(res.headers.get("content-type") || "").toLowerCase().includes("json")) {
-    throw new Error("SearXNG did not return JSON; this instance may not enable format=json.");
+  if (!(res.headers.get("content-type") || "").toLowerCase().includes(
+    format === "html" ? "text/html" : "json"
+  )) {
+    throw new Error(format === "html"
+      ? "SearXNG did not return HTML; this instance may block automated searches."
+      : "SearXNG did not return JSON; this instance may not enable format=json.");
   }
   const length = Number(res.headers.get("content-length") || "0");
   if (length > MAX_RESPONSE_BYTES) throw new Error("SearXNG response exceeded size limit.");
@@ -97,7 +120,7 @@ async function readJsonLimited(res, controller) {
     if (new TextEncoder().encode(text).length > MAX_RESPONSE_BYTES) {
       throw new Error("SearXNG response exceeded size limit.");
     }
-    return JSON.parse(text);
+    return text;
   }
   const chunks = [];
   let bytes = 0;
@@ -121,7 +144,7 @@ async function readJsonLimited(res, controller) {
     result.set(chunk, offset);
     offset += chunk.length;
   }
-  return JSON.parse(new TextDecoder().decode(result));
+  return new TextDecoder().decode(result);
 }
 
 function errorLabel(error) {
@@ -139,12 +162,13 @@ function cooldown(origin, ms) {
 async function searchOne(env, endpoint, args, authOrigin, timeoutMs) {
   const url = new URL(endpoint.url);
   url.searchParams.set("q", String(args.query).slice(0, 1000));
-  url.searchParams.set("format", "json");
+  const format = endpoint.format || "json";
+  if (format === "json") url.searchParams.set("format", "json");
   url.searchParams.set("categories", args.mode === "news" ? "news" : "general");
   url.searchParams.set("language", LANGUAGES[args.market] || LANGUAGES.global);
   url.searchParams.set("safesearch", "0");
 
-  const headers = { Accept: "application/json" };
+  const headers = { Accept: format === "html" ? "text/html" : "application/json" };
   if (env.SEARXNG_BEARER_TOKEN && endpoint.origin === authOrigin) {
     headers.Authorization = "Bearer " + env.SEARXNG_BEARER_TOKEN;
   }
@@ -157,7 +181,14 @@ async function searchOne(env, endpoint, args, authOrigin, timeoutMs) {
       redirect: "error",
       signal: controller.signal,
     });
-    const json = await readJsonLimited(response, controller);
+    const body = await readBodyLimited(response, controller, format);
+    if (format === "html") {
+      return parseSearxngHtml(body, {
+        origin: endpoint.origin,
+        limit: Math.min(Math.max(1, args.limit * 3), 40),
+      });
+    }
+    const json = JSON.parse(body);
     if (!Array.isArray(json?.results)) {
       throw new Error("SearXNG JSON response has no results array.");
     }
