@@ -31,8 +31,13 @@ export function parseSearchRss(xml, { source, limit = 10 }) {
   }
   const parsed = parser.parse(xml);
   const channel = parsed?.rss?.channel;
-  if (!channel || typeof channel !== "object") {
+  if (channel === undefined || channel === null) {
     throw new Error("Invalid RSS feed: missing channel.");
+  }
+  // fast-xml-parser represents an empty <channel/> as an empty string.
+  if (channel === "") return [];
+  if (typeof channel !== "object") {
+    throw new Error("Invalid RSS feed: malformed channel.");
   }
   const rawItems = channel.item === undefined ? [] : Array.isArray(channel.item) ? channel.item : [channel.item];
   return rawItems.slice(0, limit).map((item) => {
