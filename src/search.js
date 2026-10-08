@@ -1,3 +1,6 @@
+import { searchSearxng } from "./providers/searxng.js";
+import { parseSearchRss } from "./parsers/rss.js";
+
 const UA = "CloudflareSearchMCP/1.0";
 const PROVIDER_TIMEOUT_MS = 8000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1_500_000;
@@ -479,21 +482,13 @@ async function searchDuckDuckGoLite(query, limit) {
 }
 
 function parseRss(xml, source, limit) {
-  const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
-  return items.slice(0, limit).map((item) => {
-    const publisher = item.match(
-      /<source\b[^>]*url=["']([^"']+)["'][^>]*>([\s\S]*?)<\/source>/i,
-    );
-    return {
-      title: tag(item, "title"),
-      url: normalizeUrl(tag(item, "link")),
-      description: tag(item, "description"),
-      published_at: tag(item, "pubDate") || undefined,
-      publisher: publisher ? stripHtml(publisher[2]) : undefined,
-      publisher_url: publisher ? normalizeUrl(publisher[1]) : undefined,
-      source,
-    };
-  }).filter((result) => result.title && /^https?:\/\//i.test(result.url));
+  return parseSearchRss(xml, { source, limit }).map((result) => ({
+    ...result,
+    url: normalizeUrl(result.url),
+    publisher_url: result.publisher_url
+      ? normalizeUrl(result.publisher_url)
+      : undefined,
+  })).filter((result) => result.url);
 }
 
 async function searchBingRss(query, limit, market) {
@@ -626,6 +621,20 @@ export async function searchWeb(env, {
   const cap = Math.min(n * 2, 20);
   const q = buildQuery(query, mode, market, domains);
 
+  if (backend === "searxng") {
+    const matches = postProcess(
+      await searchSearxng(env, { query: q, market, mode, limit: cap }),
+      query, domains, n,
+    );
+    return {
+      query: q,
+      search_queries: [q],
+      backend: "searxng",
+      quality: matches.quality,
+      results: matches.results,
+    };
+  }
+
   if (mode === "news") {
     const news = await searchNews(q, query, n, market, domains);
     return {
@@ -667,8 +676,11 @@ export async function searchWeb(env, {
   const fallbacksUsed = [];
   const fallbacksAttempted = [];
   const searchQueries = [q];
-  const primarySearches = [searchDuckDuckGo(q, cap)];
-  if (env.ENABLE_BING_RSS === "1") {
+  const hasSearxng = Boolean(env.SEARXNG_URL);
+  const primarySearches = hasSearxng
+    ? [searchSearxng(env, { query: q, market, mode, limit: cap })]
+    : [searchDuckDuckGo(q, cap)];
+  if (!hasSearxng && env.ENABLE_BING_RSS === "1") {
     primarySearches.push(searchBingRss(q, cap, market));
   }
   let rawResults = await collectSearches(
@@ -683,6 +695,19 @@ export async function searchWeb(env, {
     processed.results.length < minimumUseful ||
     processed.quality.top_score < 0.34 ||
     processed.quality.average_top3 < 0.22;
+
+  // Keep established free providers as a fallback if the self-hosted instance is unhealthy.
+  if (hasSearxng && lowQuality()) {
+    fallbacksAttempted.push("duckduckgo");
+    const ddg = await collectSearches(
+      [searchDuckDuckGo(q, cap)], errors, "searxng-fallback",
+    );
+    if (ddg.length) {
+      rawResults.push(...ddg);
+      fallbacksUsed.push("duckduckgo");
+      processed = postProcess(rawResults, query, domains, n);
+    }
+  }
 
   if (lowQuality()) {
     fallbacksAttempted.push("duckduckgo-lite", "bing-html");
@@ -769,8 +794,8 @@ export async function searchWeb(env, {
     backend: backend === "auto" && uniqueAttempts.length
       ? "auto:free-fallbacks"
       : backend === "auto"
-        ? "auto:free"
-        : "free",
+        ? hasSearxng ? "auto:searxng" : "auto:free"
+        : hasSearxng ? "free:searxng" : "free",
     fallbacks_used: uniqueFallbacks,
     fallbacks_attempted: uniqueAttempts,
     quality: processed.quality,

@@ -43,14 +43,14 @@ function createServer(env) {
     {
       title: "Search the web",
       description:
-        "Search current web or news sources. Use mode=supplier for manufacturers, warehouses, or distributors; commerce for products, pricing, or marketplaces; technical for docs, GitHub, releases, or APIs; and news for fresh reporting. SA, AE, and CN market settings add geographic context. Default search is free and does not consume paid search API credits.",
+        "Search current web or news sources. Uses a configured SearXNG metasearch instance when available, otherwise free search providers. Use mode=supplier for manufacturers, warehouses, or distributors; commerce for products, pricing, or marketplaces; technical for docs, GitHub, releases, or APIs; and news for fresh reporting. SA, AE, and CN market settings add geographic context. Default search is free and does not consume paid search API credits.",
       inputSchema: {
         query: z.string().min(1).max(800),
         mode: z.enum(["web", "news", "supplier", "commerce", "technical"]).optional().default("web"),
         market: z.enum(["global", "SA", "AE", "CN"]).optional().default("global"),
         limit: z.number().int().min(1).max(20).optional().default(10),
         domains: z.array(z.string().min(1).max(253)).max(5).optional().default([]),
-        backend: z.enum(["free", "auto"]).optional().default("free"),
+        backend: z.enum(["free", "auto", "searxng"]).optional().default("free"),
       },
       annotations: {
         readOnlyHint: true,

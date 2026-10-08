@@ -149,3 +149,28 @@ Public search endpoints can throttle or change markup. Marketplace sites and bot
 ## License
 
 MIT
+
+
+## Reliable open-source search: SearXNG
+
+The Worker now integrates the independently maintained [SearXNG](https://github.com/searxng/searxng) metasearch server via its documented JSON search API. SearXNG runs **separately** (Python/Docker); the Worker stays on Cloudflare.
+
+The integration is optional. To use it, deploy an HTTPS SearXNG instance and set the Worker environment variable `SEARXNG_URL` to its public HTTPS base address. JSON must be enabled in SearXNG's `settings.yml`:
+
+```yaml
+use_default_settings: true
+search:
+  formats: [html, json]
+```
+
+Set a secure SearXNG `server.secret_key` and protect the deployment behind access control or an authenticated reverse proxy. If your reverse proxy accepts Bearer credentials, store one as a **Cloudflare Worker secret**, never in the repository:
+
+```bash
+npx wrangler secret put SEARXNG_BEARER_TOKEN
+```
+
+The Worker calls `GET /search?q=...&format=json`, passes market-sensitive language settings and normalizes the results into the existing MCP result format. `backend: "searxng"` forces SearXNG; `backend: "free"` or `"auto"` prefer it when configured and fall back to the existing retrieval sources if the instance is unavailable.
+
+The service is free open-source software, but **hosting and upstream rate-limits are not free of operational constraints**. SearXNG is **AGPL-3.0** and runs as its own upstream service; this repository contains only a HTTP client adapter and does not copy its server source. For deployment, follow the **current** [SearXNG container installation documentation](https://docs.searxng.org/admin/installation-docker), not the archived searxng-docker repository. Respect the terms and robots policies of upstream search engines.
+
+RSS and publisher metadata are parsed using the MIT-licensed [fast-xml-parser](https://github.com/NaturalIntelligence/fast-xml-parser) and [Cheerio](https://github.com/cheeriojs/cheerio), replacing regex-based XML parsing.
