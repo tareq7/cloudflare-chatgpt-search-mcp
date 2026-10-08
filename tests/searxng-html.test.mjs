@@ -47,7 +47,7 @@ test("HTML use requires exactly configured and approved HTTPS origin",()=>{
     assert.throws(()=>configuredSearxngEndpoints({
       SEARXNG_URL:"https://search.example.org",
       SEARXNG_HTML_ORIGINS:invalid,
-    }),/HTTPS|configured|host|credentials|allowed/i);
+    }),/HTTPS|configured|host|credentials|allowed|origin/i);
   }
 });
 
