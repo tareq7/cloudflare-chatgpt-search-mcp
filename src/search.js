@@ -1,5 +1,6 @@
 import { searchSearxng } from "./providers/searxng.js";
 import { parseSearchRss } from "./parsers/rss.js";
+import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
 
 const UA = "CloudflareSearchMCP/1.0";
 const PROVIDER_TIMEOUT_MS = 8000;
@@ -423,23 +424,9 @@ async function fetchText(url, init = {}, limits = {}) {
 async function searchDuckDuckGo(query, limit) {
   const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
   const html = await fetchText(url, { method: "GET" });
-  const blocks = html.split(/<div[^>]+class="[^"]*\bresult\b[^"]*"[^>]*>/i).slice(1);
-  const results = [];
-
-  for (const block of blocks) {
-    const a = block.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
-      || block.match(/<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!a) continue;
-
-    const sm = block.match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div)>/i);
-    results.push({
-      title: stripHtml(a[2]),
-      url: normalizeUrl(a[1]),
-      description: sm ? stripHtml(sm[1]) : "",
-      source: "duckduckgo",
-    });
-    if (results.length >= limit) break;
-  }
+  const results = parseDuckDuckGoHtml(html, limit)
+    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+    .filter((item) => item.url);
 
   if (!results.length && /result__a|result__snippet/i.test(html)) {
     throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
@@ -450,35 +437,9 @@ async function searchDuckDuckGo(query, limit) {
 async function searchDuckDuckGoLite(query, limit) {
   const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
   const html = await fetchText(url, { method: "GET" });
-  const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  const results = [];
-  const matches = [...html.matchAll(anchorRe)];
-
-  for (let index = 0; index < matches.length; index += 1) {
-    const match = matches[index];
-    const attrs = match[1] || "";
-    if (!/class=['"][^'"]*\bresult-link\b[^'"]*['"]/i.test(attrs)) continue;
-
-    const href = attrs.match(/href=['"]([^'"]+)['"]/i);
-    if (!href) continue;
-
-    const nextOffset = matches[index + 1]?.index ?? html.length;
-    const tail = html.slice(match.index + match[0].length, nextOffset);
-    const snippet = tail.match(
-      /<td[^>]+class=['"][^'"]*\bresult-snippet\b[^'"]*['"][^>]*>([\s\S]*?)<\/td>/i,
-    );
-
-    results.push({
-      title: stripHtml(match[2]),
-      url: normalizeUrl(href[1]),
-      description: snippet ? stripHtml(snippet[1]) : "",
-      source: "duckduckgo-lite",
-    });
-
-    if (results.length >= limit) break;
-  }
-
-  return results;
+  return parseDuckDuckGoLite(html, limit)
+    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+    .filter((item) => item.url);
 }
 
 function parseRss(xml, source, limit) {
@@ -519,25 +480,9 @@ async function searchBingHtml(query, limit, market) {
   p.set("setlang", "en");
 
   const html = await fetchText("https://www.bing.com/search?" + p.toString());
-  const blocks = html.split(/<li[^>]+class="[^"]*\bb_algo\b[^"]*"[^>]*>/i).slice(1);
-  const results = [];
-
-  for (const block of blocks) {
-    const a = block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!a) continue;
-
-    const pm = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const url = normalizeUrl(a[1]);
-    if (!url) continue;
-
-    results.push({
-      title: stripHtml(a[2]),
-      url,
-      description: pm ? stripHtml(pm[1]) : "",
-      source: "bing-html",
-    });
-    if (results.length >= limit) break;
-  }
+  const results = parseBingHtml(html, limit)
+    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+    .filter((item) => item.url);
 
   if (!results.length && /\bb_algo\b/i.test(html)) {
     throw new Error("Bing parser found result markup but parsed zero results.");
