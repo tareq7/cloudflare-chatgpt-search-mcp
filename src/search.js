@@ -566,15 +566,28 @@ export async function searchWeb(env, {
   const cap = Math.min(n * 2, 20);
   const q = buildQuery(query, mode, market, domains);
 
+  const searxngEnabled = Boolean(env.SEARXNG_URL || env.SEARXNG_URLS);
+  const searxngDiagnostics = { attempted: [], skipped: [], selected: null };
+  const searxngUseful = (items) => {
+    const quality = postProcess(items, query, domains, n);
+    return quality.results.length >= Math.min(3, n) &&
+      quality.quality.top_score >= 0.34 &&
+      quality.quality.average_top3 >= 0.22;
+  };
+
   if (backend === "searxng") {
     const matches = postProcess(
-      await searchSearxng(env, { query: q, market, mode, limit: cap }),
+      await searchSearxng(env, {
+        query: q, market, mode, limit: cap,
+        isUseful: searxngUseful, diagnostics: searxngDiagnostics,
+      }),
       query, domains, n,
     );
     return {
       query: q,
       search_queries: [q],
       backend: "searxng",
+      searxng_chain: searxngDiagnostics,
       quality: matches.quality,
       results: matches.results,
     };
@@ -621,9 +634,12 @@ export async function searchWeb(env, {
   const fallbacksUsed = [];
   const fallbacksAttempted = [];
   const searchQueries = [q];
-  const hasSearxng = Boolean(env.SEARXNG_URL);
+  const hasSearxng = searxngEnabled;
   const primarySearches = hasSearxng
-    ? [searchSearxng(env, { query: q, market, mode, limit: cap })]
+    ? [searchSearxng(env, {
+        query: q, market, mode, limit: cap,
+        isUseful: searxngUseful, diagnostics: searxngDiagnostics,
+      })]
     : [searchDuckDuckGo(q, cap)];
   if (!hasSearxng && env.ENABLE_BING_RSS === "1") {
     primarySearches.push(searchBingRss(q, cap, market));
@@ -714,6 +730,7 @@ export async function searchWeb(env, {
         paid_fallback_used: true,
         fallbacks_used: [...new Set(fallbacksUsed)],
         fallbacks_attempted: [...new Set(fallbacksAttempted)],
+        ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
         auto: {
           escalated: true,
           recovered,
@@ -743,6 +760,7 @@ export async function searchWeb(env, {
         : hasSearxng ? "free:searxng" : "free",
     fallbacks_used: uniqueFallbacks,
     fallbacks_attempted: uniqueAttempts,
+    ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
     quality: processed.quality,
     errors,
     results: processed.results,
@@ -771,15 +789,20 @@ export async function multiSearch(env, {
   limit_per_query = 6,
 }) {
   const list = queries.filter(Boolean).slice(0, 6);
-  const responses = await Promise.all(
-    list.map((query) => searchWeb(env, {
-      query,
-      mode,
-      market,
-      limit: Math.max(1, Math.min(Number(limit_per_query) || 6, 10)),
-      backend: "free",
-    }))
-  );
+  // Multi-query searches must not burst traffic across shared public instances.
+  const runOne = (query) => searchWeb(env, {
+    query,
+    mode,
+    market,
+    limit: Math.max(1, Math.min(Number(limit_per_query) || 6, 10)),
+    backend: "free",
+  });
+  const responses = [];
+  if (env.SEARXNG_URL || env.SEARXNG_URLS) {
+    for (const query of list) responses.push(await runOne(query));
+  } else {
+    responses.push(...await Promise.all(list.map(runOne)));
+  }
   const combined = dedupe(
     responses.flatMap((response) => response.results),
     Math.min(30, list.length * limit_per_query),
