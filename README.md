@@ -149,3 +149,64 @@ Public search endpoints can throttle or change markup. Marketplace sites and bot
 ## License
 
 MIT
+
+
+## Reliable open-source search: SearXNG
+
+The Worker now integrates the independently maintained [SearXNG](https://github.com/searxng/searxng) metasearch server via its documented JSON search API. SearXNG runs **separately** (Python/Docker); the Worker stays on Cloudflare.
+
+The integration is optional. To use it, deploy an HTTPS SearXNG instance and set the Worker environment variable `SEARXNG_URL` to its public HTTPS base address. JSON must be enabled in SearXNG's `settings.yml`:
+
+```yaml
+use_default_settings: true
+search:
+  formats: [html, json]
+```
+
+Set a secure SearXNG `server.secret_key` and protect the deployment behind access control or an authenticated reverse proxy. If your reverse proxy accepts Bearer credentials, store one as a **Cloudflare Worker secret**, never in the repository:
+
+```bash
+npx wrangler secret put SEARXNG_BEARER_TOKEN
+```
+
+The Worker calls `GET /search?q=...&format=json`, passes market-sensitive language settings and normalizes the results into the existing MCP result format. `backend: "searxng"` forces SearXNG; `backend: "free"` or `"auto"` prefer it when configured and fall back to the existing retrieval sources if the instance is unavailable.
+
+The service is free open-source software, but **hosting and upstream rate-limits are not free of operational constraints**. SearXNG is **AGPL-3.0** and runs as its own upstream service; this repository contains only a HTTP client adapter and does not copy its server source. For deployment, follow the **current** [SearXNG container installation documentation](https://docs.searxng.org/admin/installation-docker), not the archived searxng-docker repository. Respect the terms and robots policies of upstream search engines.
+
+The news endpoint parses Google and Bing RSS independently: a malformed or blocked feed is discarded without losing valid items from the other provider.
+
+RSS and publisher metadata are parsed using the MIT-licensed [fast-xml-parser](https://github.com/NaturalIntelligence/fast-xml-parser) and [Cheerio](https://github.com/cheeriojs/cheerio), replacing regex-based XML parsing.
+
+
+## Personal-use public SearXNG fallback chain
+
+**This remote MCP is designed for one person's private use.** Public SearXNG instances are operated by independent volunteers, and an HTML search page does **not** imply authorization for automated JSON API requests. Do not put private supplier communications, credentials, addresses or other sensitive query details through an operator you do not trust.
+
+The optional SearXNG provider supports an **explicitly configured, sequential failover chain**. It never discovers random public hosts or adds unapproved instances at runtime.
+
+Configuration (set Worker variables/secrets through your Cloudflare environment, never in Git):
+
+```text
+SEARXNG_URL=https://approved-primary.example.org
+SEARXNG_URLS=https://approved-backup-1.example.org,https://approved-backup-2.example.org
+SEARXNG_MAX_ATTEMPTS=2
+SEARXNG_TIMEOUT_MS=5500
+```
+
+`SEARXNG_URL` is the first instance. `SEARXNG_URLS` appends additional instances; duplicates are discarded. The chain attempts a maximum of **two** instances per search by default, with a hard maximum of three. Each attempt has its own bounded timeout and response-size limit. Requests are serial, and the `multi_search` MCP tool runs queries serially whenever a SearXNG backend is configured to reduce load on public instances.
+
+The chain accepts **only HTTPS public hostnames**. If the primary requires a bearer token, save it as the Worker secret `SEARXNG_BEARER_TOKEN`; it is sent **only to the primary's origin**, never to backups. All target instances must independently allow your planned personal JSON API use. In particular, [priv.au's personal-use API](https://priv.au/api) requires **an operator-issued API key**; visiting the site without a key is not enough.
+
+Fallback behavior:
+
+1. A successful JSON response containing results that meet the MCP relevance and domain-filter checks is returned immediately.
+2. Timeout, 5xx, and invalid JSON temporarily cool down the affected instance. Empty or low-relevance results may try the next approved instance **without** marking the current host unhealthy.
+3. HTTP **401, 403 or 429** stops the public-instance chain immediately; it never switches to another public host to work around an API denial or quota.
+4. If all approved hosts are unavailable, the MCP's existing DuckDuckGo/Bing retrieval paths remain available for best-effort fallback.
+5. Results include `searxng_chain` diagnostics showing attempted/skipped/selected **host origins only** (not bearer credentials or request URLs).
+
+The host cooldown is best-effort within a Cloudflare isolate; it is **not** a globally consistent distributed rate limiter. Do not configure public hosts for production unless their policies authorize automated API queries and the JSON response has been verified from the Worker runtime.
+
+SearXNG directory: [searx.space](https://searx.space/). The directory measures **web search**, not authorization or JSON availability. Do not equate a 100% directory availability score with a usable search API.
+
+**Important:** In the October 8, 2026 one-request-per-host GitHub Actions checks, all initially selected public instances returned HTML, HTTP 403, or HTTP 429 instead of JSON. The repository intentionally ships with **no public hostnames enabled by default**. This keeps hosting free and avoids changing production behavior before operator permission is secured.

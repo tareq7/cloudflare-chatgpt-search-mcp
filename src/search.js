@@ -1,3 +1,7 @@
+import { searchSearxng } from "./providers/searxng.js";
+import { parseSearchRss } from "./parsers/rss.js";
+import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
+
 const UA = "CloudflareSearchMCP/1.0";
 const PROVIDER_TIMEOUT_MS = 8000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1_500_000;
@@ -420,23 +424,9 @@ async function fetchText(url, init = {}, limits = {}) {
 async function searchDuckDuckGo(query, limit) {
   const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
   const html = await fetchText(url, { method: "GET" });
-  const blocks = html.split(/<div[^>]+class="[^"]*\bresult\b[^"]*"[^>]*>/i).slice(1);
-  const results = [];
-
-  for (const block of blocks) {
-    const a = block.match(/<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
-      || block.match(/<a[^>]+href="([^"]+)"[^>]+class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!a) continue;
-
-    const sm = block.match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div)>/i);
-    results.push({
-      title: stripHtml(a[2]),
-      url: normalizeUrl(a[1]),
-      description: sm ? stripHtml(sm[1]) : "",
-      source: "duckduckgo",
-    });
-    if (results.length >= limit) break;
-  }
+  const results = parseDuckDuckGoHtml(html, limit)
+    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+    .filter((item) => item.url);
 
   if (!results.length && /result__a|result__snippet/i.test(html)) {
     throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
@@ -447,53 +437,19 @@ async function searchDuckDuckGo(query, limit) {
 async function searchDuckDuckGoLite(query, limit) {
   const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
   const html = await fetchText(url, { method: "GET" });
-  const anchorRe = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  const results = [];
-  const matches = [...html.matchAll(anchorRe)];
-
-  for (let index = 0; index < matches.length; index += 1) {
-    const match = matches[index];
-    const attrs = match[1] || "";
-    if (!/class=['"][^'"]*\bresult-link\b[^'"]*['"]/i.test(attrs)) continue;
-
-    const href = attrs.match(/href=['"]([^'"]+)['"]/i);
-    if (!href) continue;
-
-    const nextOffset = matches[index + 1]?.index ?? html.length;
-    const tail = html.slice(match.index + match[0].length, nextOffset);
-    const snippet = tail.match(
-      /<td[^>]+class=['"][^'"]*\bresult-snippet\b[^'"]*['"][^>]*>([\s\S]*?)<\/td>/i,
-    );
-
-    results.push({
-      title: stripHtml(match[2]),
-      url: normalizeUrl(href[1]),
-      description: snippet ? stripHtml(snippet[1]) : "",
-      source: "duckduckgo-lite",
-    });
-
-    if (results.length >= limit) break;
-  }
-
-  return results;
+  return parseDuckDuckGoLite(html, limit)
+    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+    .filter((item) => item.url);
 }
 
 function parseRss(xml, source, limit) {
-  const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
-  return items.slice(0, limit).map((item) => {
-    const publisher = item.match(
-      /<source\b[^>]*url=["']([^"']+)["'][^>]*>([\s\S]*?)<\/source>/i,
-    );
-    return {
-      title: tag(item, "title"),
-      url: normalizeUrl(tag(item, "link")),
-      description: tag(item, "description"),
-      published_at: tag(item, "pubDate") || undefined,
-      publisher: publisher ? stripHtml(publisher[2]) : undefined,
-      publisher_url: publisher ? normalizeUrl(publisher[1]) : undefined,
-      source,
-    };
-  }).filter((result) => result.title && /^https?:\/\//i.test(result.url));
+  return parseSearchRss(xml, { source, limit }).map((result) => ({
+    ...result,
+    url: normalizeUrl(result.url),
+    publisher_url: result.publisher_url
+      ? normalizeUrl(result.publisher_url)
+      : undefined,
+  })).filter((result) => result.url);
 }
 
 async function searchBingRss(query, limit, market) {
@@ -524,25 +480,9 @@ async function searchBingHtml(query, limit, market) {
   p.set("setlang", "en");
 
   const html = await fetchText("https://www.bing.com/search?" + p.toString());
-  const blocks = html.split(/<li[^>]+class="[^"]*\bb_algo\b[^"]*"[^>]*>/i).slice(1);
-  const results = [];
-
-  for (const block of blocks) {
-    const a = block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!a) continue;
-
-    const pm = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const url = normalizeUrl(a[1]);
-    if (!url) continue;
-
-    results.push({
-      title: stripHtml(a[2]),
-      url,
-      description: pm ? stripHtml(pm[1]) : "",
-      source: "bing-html",
-    });
-    if (results.length >= limit) break;
-  }
+  const results = parseBingHtml(html, limit)
+    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+    .filter((item) => item.url);
 
   if (!results.length && /\bb_algo\b/i.test(html)) {
     throw new Error("Bing parser found result markup but parsed zero results.");
@@ -566,11 +506,17 @@ async function searchNews(searchQuery, relevanceQuery, limit, market, domains = 
   ]);
 
   const out = [];
-  if (google.status === "fulfilled") {
-    out.push(...parseRss(google.value, "google-news-rss", limit * 2));
-  }
-  if (bing.status === "fulfilled") {
-    out.push(...parseRss(bing.value, "bing-news-rss", limit * 2));
+  for (const [settled, source] of [
+    [google, "google-news-rss"],
+    [bing, "bing-news-rss"],
+  ]) {
+    if (settled.status !== "fulfilled") continue;
+    try {
+      out.push(...parseRss(settled.value, source, limit * 2));
+    } catch {
+      // A blocked, truncated, or malformed feed should never discard the
+      // independent provider's valid news results.
+    }
   }
 
   return postProcess(out, relevanceQuery, domains, limit);
@@ -626,6 +572,33 @@ export async function searchWeb(env, {
   const cap = Math.min(n * 2, 20);
   const q = buildQuery(query, mode, market, domains);
 
+  const searxngEnabled = Boolean(env.SEARXNG_URL || env.SEARXNG_URLS);
+  const searxngDiagnostics = { attempted: [], skipped: [], selected: null };
+  const searxngUseful = (items) => {
+    const quality = postProcess(items, query, domains, n);
+    return quality.results.length >= Math.min(3, n) &&
+      quality.quality.top_score >= 0.34 &&
+      quality.quality.average_top3 >= 0.22;
+  };
+
+  if (backend === "searxng") {
+    const matches = postProcess(
+      await searchSearxng(env, {
+        query: q, market, mode, limit: cap,
+        isUseful: searxngUseful, diagnostics: searxngDiagnostics,
+      }),
+      query, domains, n,
+    );
+    return {
+      query: q,
+      search_queries: [q],
+      backend: "searxng",
+      searxng_chain: searxngDiagnostics,
+      quality: matches.quality,
+      results: matches.results,
+    };
+  }
+
   if (mode === "news") {
     const news = await searchNews(q, query, n, market, domains);
     return {
@@ -667,8 +640,14 @@ export async function searchWeb(env, {
   const fallbacksUsed = [];
   const fallbacksAttempted = [];
   const searchQueries = [q];
-  const primarySearches = [searchDuckDuckGo(q, cap)];
-  if (env.ENABLE_BING_RSS === "1") {
+  const hasSearxng = searxngEnabled;
+  const primarySearches = hasSearxng
+    ? [searchSearxng(env, {
+        query: q, market, mode, limit: cap,
+        isUseful: searxngUseful, diagnostics: searxngDiagnostics,
+      })]
+    : [searchDuckDuckGo(q, cap)];
+  if (!hasSearxng && env.ENABLE_BING_RSS === "1") {
     primarySearches.push(searchBingRss(q, cap, market));
   }
   let rawResults = await collectSearches(
@@ -683,6 +662,19 @@ export async function searchWeb(env, {
     processed.results.length < minimumUseful ||
     processed.quality.top_score < 0.34 ||
     processed.quality.average_top3 < 0.22;
+
+  // Keep established free providers as a fallback if the self-hosted instance is unhealthy.
+  if (hasSearxng && lowQuality()) {
+    fallbacksAttempted.push("duckduckgo");
+    const ddg = await collectSearches(
+      [searchDuckDuckGo(q, cap)], errors, "searxng-fallback",
+    );
+    if (ddg.length) {
+      rawResults.push(...ddg);
+      fallbacksUsed.push("duckduckgo");
+      processed = postProcess(rawResults, query, domains, n);
+    }
+  }
 
   if (lowQuality()) {
     fallbacksAttempted.push("duckduckgo-lite", "bing-html");
@@ -744,6 +736,7 @@ export async function searchWeb(env, {
         paid_fallback_used: true,
         fallbacks_used: [...new Set(fallbacksUsed)],
         fallbacks_attempted: [...new Set(fallbacksAttempted)],
+        ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
         auto: {
           escalated: true,
           recovered,
@@ -769,10 +762,11 @@ export async function searchWeb(env, {
     backend: backend === "auto" && uniqueAttempts.length
       ? "auto:free-fallbacks"
       : backend === "auto"
-        ? "auto:free"
-        : "free",
+        ? hasSearxng ? "auto:searxng" : "auto:free"
+        : hasSearxng ? "free:searxng" : "free",
     fallbacks_used: uniqueFallbacks,
     fallbacks_attempted: uniqueAttempts,
+    ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
     quality: processed.quality,
     errors,
     results: processed.results,
@@ -801,15 +795,20 @@ export async function multiSearch(env, {
   limit_per_query = 6,
 }) {
   const list = queries.filter(Boolean).slice(0, 6);
-  const responses = await Promise.all(
-    list.map((query) => searchWeb(env, {
-      query,
-      mode,
-      market,
-      limit: Math.max(1, Math.min(Number(limit_per_query) || 6, 10)),
-      backend: "free",
-    }))
-  );
+  // Multi-query searches must not burst traffic across shared public instances.
+  const runOne = (query) => searchWeb(env, {
+    query,
+    mode,
+    market,
+    limit: Math.max(1, Math.min(Number(limit_per_query) || 6, 10)),
+    backend: "free",
+  });
+  const responses = [];
+  if (env.SEARXNG_URL || env.SEARXNG_URLS) {
+    for (const query of list) responses.push(await runOne(query));
+  } else {
+    responses.push(...await Promise.all(list.map(runOne)));
+  }
   const combined = dedupe(
     responses.flatMap((response) => response.results),
     Math.min(30, list.length * limit_per_query),
