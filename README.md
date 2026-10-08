@@ -173,6 +173,8 @@ The Worker calls `GET /search?q=...&format=json`, passes market-sensitive langua
 
 The service is free open-source software, but **hosting and upstream rate-limits are not free of operational constraints**. SearXNG is **AGPL-3.0** and runs as its own upstream service; this repository contains only a HTTP client adapter and does not copy its server source. For deployment, follow the **current** [SearXNG container installation documentation](https://docs.searxng.org/admin/installation-docker), not the archived searxng-docker repository. Respect the terms and robots policies of upstream search engines.
 
+The news endpoint parses Google and Bing RSS independently: a malformed or blocked feed is discarded without losing valid items from the other provider.
+
 RSS and publisher metadata are parsed using the MIT-licensed [fast-xml-parser](https://github.com/NaturalIntelligence/fast-xml-parser) and [Cheerio](https://github.com/cheeriojs/cheerio), replacing regex-based XML parsing.
 
 
