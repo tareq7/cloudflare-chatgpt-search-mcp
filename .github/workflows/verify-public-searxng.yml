@@ -22,13 +22,13 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           const hosts = [
-            'https://searx.ononoki.org',
-            'https://search.pereira.is',
-            'https://search.inetol.net',
-            'https://searx.tiekoetter.com',
-            'https://baresearch.org',
-            'https://www.isci.si',
-            'https://searxng.site',
+            'https://search.femboy.ad',
+            'https://search.pi.vps.pw',
+            'https://search.lumy.live',
+            'https://searxng.eshnetwork.space',
+            'https://search.jeremyh.xyz',
+            'https://searxng.website',
+            'https://search.spiralab.org',
           ];
           for (const host of hosts) {
             const url = host + '/search?q=' + encodeURIComponent('SearXNG API capability check') + '&format=json';
