@@ -15,6 +15,7 @@
   "browser": { "binding": "BROWSER" },
   "vars": {
     "ALLOW_PAID_WEBSEARCH": "0",
+    "ENABLE_BING_RSS": "0",
     "WEBSEARCH_GATEWAY_ID": "default"
   }
 }
