@@ -1,0 +1,74 @@
+name: Temporary single-pass SearXNG research probe
+on:
+  push:
+    branches: [research/searxng-20261008-onepass]
+    paths: [.github/workflows/searxng-once-research.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Test unique instances once without retries, redirects, or evasion
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const jsonCandidates = [
+            'searx.perennialte.ch',
+            'search.hbubli.cc',
+            'searx.oloke.xyz',
+            'etsi.me',
+            'xka.cz',
+            'kantan.cat',
+            'searx.linxx.net',
+            'searxng.deggo.fyi',
+            'searxng.buffon.cloud',
+            'searxng.shreven.org',
+            'searx.64e.org',
+            'searx.party',
+            'metacat.online',
+            'search.im-in.space',
+          ];
+          const htmlCandidates = [
+            'search.mectov.my.id',
+            'sx.xo.st',
+            'failsearx.culturanerd.it',
+            'searx.ro',
+            'searx.sev.monster',
+            'search.catboy.house',
+            'search.indst.eu',
+            'search.einfachzocken.eu'
+          ];
+          for (const [format,hosts] of [['json',jsonCandidates],['html',htmlCandidates]]) {
+            for (const host of hosts) {
+              const url = new URL('https://' + host + '/search');
+              url.searchParams.set('q','searxng metasearch');
+              if(format==='json') url.searchParams.set('format','json');
+              const start=Date.now();
+              try{
+                const r=await fetch(url,{redirect:'manual',signal:AbortSignal.timeout(4700),headers:{'accept':format==='json'?'application/json':'text/html','user-agent':'PersonalSearXNGCapabilityResearch/1.0 (https://github.com/tareq7/cloudflare-chatgpt-search-mcp)'}});
+                const type=(r.headers.get('content-type')||'').split(';')[0];
+                let count=0;
+                let valid=false;
+                if(r.status===200 && (format==='json'?type.includes('json'):type.includes('html'))){
+                  const declared=Number(r.headers.get('content-length')||0);
+                  if(declared<500000){
+                    const content=await r.text();
+                    if(content.length<500000){
+                      if(format==='json'){
+                        try{const j=JSON.parse(content);valid=Array.isArray(j.results);count=j.results?.length||0;}catch{}
+                      } else {
+                        valid=content.includes('result')&&content.includes('<');
+                        count=(content.match(/<article\b[^>]*\bclass\s*=\s*["'][^"']*\bresult\b/gi)||[]).length;
+                      }
+                    }
+                  }
+                } else await r.body?.cancel();
+                console.log(JSON.stringify({host,format,status:r.status,type,valid,count,elapsedMs:Date.now()-start}));
+              }catch(e){
+                console.log(JSON.stringify({host,format,error:e?.name==='TimeoutError'?'timeout':String(e?.message||e).slice(0,110),elapsedMs:Date.now()-start}));
+              }
+            }
+          }
+          NODE
