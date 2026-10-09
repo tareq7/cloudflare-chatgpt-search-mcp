@@ -1,6 +1,4 @@
 import { searchSearxng } from "./providers/searxng.js";
-import { searchBrave } from "./providers/brave.js";
-import { searchExa } from "./providers/exa.js";
 import { parseSearchRss } from "./parsers/rss.js";
 import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
 
@@ -531,25 +529,6 @@ async function searchNews(searchQuery, relevanceQuery, limit, market, domains = 
   return postProcess(out, relevanceQuery, domains, limit);
 }
 
-async function cloudflareSearch(env, query, provider, limit) {
-  if (!env.AI?.websearch) throw new Error("Cloudflare Web Search binding is unavailable.");
-  const response = await env.AI.websearch({
-    gatewayId: env.WEBSEARCH_GATEWAY_ID || "default",
-    query,
-    provider,
-    limit: Math.min(limit, 10),
-  });
-  const body = await response.json();
-  if (!response.ok) {
-    throw new Error(body?.errors?.[0]?.message || "Cloudflare Web Search failed.");
-  }
-  return (body.items || []).map((item) => ({
-    title: item.title || "",
-    url: item.url || "",
-    description: item.description || "",
-    source: "cloudflare-" + provider,
-  }));
-}
 
 async function collectSearches(searches, errors, prefix = "") {
   const settled = await Promise.allSettled(searches);
@@ -592,37 +571,6 @@ export async function searchWeb(env, {
       quality.quality.average_top3 >= 0.22;
   };
 
-  const braveEnabled = Boolean(env.BRAVE_API_KEY || env.BRAVE_SEARCH_API_KEY);
-  const exaEnabled = Boolean(env.EXA_API_KEY || env.EXA_SEARCH_API_KEY);
-
-  if (backend === "exa") {
-    const exaResults = await searchExa(env, {
-      query: q, market, mode, limit: cap, domains,
-    });
-    const matches = postProcess(exaResults, query, domains, n);
-    return {
-      query: q,
-      search_queries: [q],
-      backend: "exa",
-      quality: matches.quality,
-      results: matches.results,
-    };
-  }
-
-  if (backend === "brave") {
-    const braveResults = await searchBrave(env, {
-      query: q, market, limit: cap,
-    });
-    const matches = postProcess(braveResults, query, domains, n);
-    return {
-      query: q,
-      search_queries: [q],
-      backend: "brave",
-      quality: matches.quality,
-      results: matches.results,
-    };
-  }
-
   if (backend === "searxng") {
     const matches = postProcess(
       await searchSearxng(env, {
@@ -643,25 +591,6 @@ export async function searchWeb(env, {
 
   if (mode === "news") {
     const news = await searchNews(q, query, n, market, domains);
-    if ((!news.results || news.results.length === 0) && exaEnabled) {
-      try {
-        const exaNews = await searchExa(env, {
-          query: q, market, mode: "news", limit: cap, domains,
-        });
-        const matches = postProcess(exaNews, query, domains, n);
-        if (matches.results.length > 0) {
-          return {
-            query: q,
-            search_queries: [q],
-            backend: "free-news-rss+exa",
-            quality: matches.quality,
-            results: matches.results,
-          };
-        }
-      } catch {
-        // Fall back to RSS output if Exa encounters an issue
-      }
-    }
     return {
       query: q,
       search_queries: [q],
@@ -671,50 +600,18 @@ export async function searchWeb(env, {
     };
   }
 
-  if (backend.startsWith("cloudflare-")) {
-    if (env.ALLOW_PAID_WEBSEARCH !== "1") {
-      throw new Error(
-        "Paid Cloudflare Web Search is disabled for this MCP. Free search remains available.",
-      );
-    }
-    const provider = backend.replace("cloudflare-", "");
-    if (!["exa", "linkup", "ceramic"].includes(provider)) {
-      throw new Error("Unsupported Cloudflare provider.");
-    }
-    const premium = postProcess(
-      await cloudflareSearch(env, q, provider, n * 2),
-      query,
-      domains,
-      n,
-    );
-    return {
-      query: q,
-      search_queries: [q],
-      backend,
-      paid: true,
-      quality: premium.quality,
-      results: premium.results,
-    };
-  }
-
   const errors = [];
   const fallbacksUsed = [];
   const fallbacksAttempted = [];
   const searchQueries = [q];
   const hasSearxng = searxngEnabled;
-  const ranExaPrimary = !hasSearxng && exaEnabled;
-  const ranBravePrimary = !hasSearxng && !exaEnabled && braveEnabled;
   const primarySearches = hasSearxng
     ? [searchSearxng(env, {
         query: q, market, mode, limit: cap,
         isUseful: searxngUseful, diagnostics: searxngDiagnostics,
       })]
-    : (ranExaPrimary
-      ? [searchExa(env, { query: q, market, mode, limit: cap, domains })]
-      : (ranBravePrimary
-        ? [searchBrave(env, { query: q, market, limit: cap })]
-        : [searchDuckDuckGo(q, cap)]));
-  if (!hasSearxng && !exaEnabled && !braveEnabled && env.ENABLE_BING_RSS === "1") {
+    : [searchDuckDuckGo(q, cap)];
+  if (!hasSearxng && env.ENABLE_BING_RSS === "1") {
     primarySearches.push(searchBingRss(q, cap, market));
   }
   let rawResults = await collectSearches(
@@ -730,34 +627,8 @@ export async function searchWeb(env, {
     processed.quality.top_score < 0.34 ||
     processed.quality.average_top3 < 0.22;
 
-  // If upstream primary returned low quality, try Exa before falling back to scrapers.
-  if (lowQuality() && exaEnabled && !ranExaPrimary) {
-    fallbacksAttempted.push("exa");
-    const exaFallback = await collectSearches(
-      [searchExa(env, { query: q, market, mode, limit: cap, domains })], errors, "exa-fallback",
-    );
-    if (exaFallback.length) {
-      rawResults.push(...exaFallback);
-      fallbacksUsed.push("exa");
-      processed = postProcess(rawResults, query, domains, n);
-    }
-  }
-
-  // If still low quality, try Brave before falling back to scrapers.
-  if (lowQuality() && braveEnabled && !ranBravePrimary) {
-    fallbacksAttempted.push("brave");
-    const braveFallback = await collectSearches(
-      [searchBrave(env, { query: q, market, limit: cap })], errors, "brave-fallback",
-    );
-    if (braveFallback.length) {
-      rawResults.push(...braveFallback);
-      fallbacksUsed.push("brave");
-      processed = postProcess(rawResults, query, domains, n);
-    }
-  }
-
   // Keep established free providers as a fallback if upstream search is unhealthy or low quality.
-  if ((hasSearxng || ranExaPrimary || ranBravePrimary) && lowQuality()) {
+  if (hasSearxng && lowQuality()) {
     fallbacksAttempted.push("duckduckgo");
     const ddg = await collectSearches(
       [searchDuckDuckGo(q, cap)], errors, "upstream-fallback",
@@ -816,36 +687,6 @@ export async function searchWeb(env, {
     }
   }
 
-  if (backend === "auto" && lowQuality() && env.ALLOW_PAID_WEBSEARCH === "1") {
-    fallbacksAttempted.push("cloudflare-ceramic");
-    try {
-      const premium = await cloudflareSearch(env, q, "ceramic", n * 2);
-      processed = postProcess([...rawResults, ...premium], query, domains, n);
-      const recovered = !lowQuality();
-      return {
-        query: q,
-        search_queries: searchQueries,
-        backend: "auto:free+cloudflare-ceramic",
-        paid_fallback_used: true,
-        fallbacks_used: [...new Set(fallbacksUsed)],
-        fallbacks_attempted: [...new Set(fallbacksAttempted)],
-        ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
-        auto: {
-          escalated: true,
-          recovered,
-          reason: recovered
-            ? "paid_fallback_recovered"
-            : "paid_fallback_exhausted",
-        },
-        quality: processed.quality,
-        errors,
-        results: processed.results,
-      };
-    } catch (error) {
-      errors.push("paid fallback: " + String(error?.message || error));
-    }
-  }
-
   const uniqueFallbacks = [...new Set(fallbacksUsed)];
   const uniqueAttempts = [...new Set(fallbacksAttempted)];
   const stillLow = lowQuality();
@@ -855,8 +696,8 @@ export async function searchWeb(env, {
     backend: backend === "auto" && uniqueAttempts.length
       ? "auto:free-fallbacks"
       : backend === "auto"
-        ? hasSearxng ? "auto:searxng" : ranExaPrimary ? "auto:exa" : ranBravePrimary ? "auto:brave" : "auto:free"
-        : hasSearxng ? "free:searxng" : ranExaPrimary ? "free:exa" : ranBravePrimary ? "free:brave" : "free",
+        ? hasSearxng ? "auto:searxng" : "auto:free"
+        : hasSearxng ? "free:searxng" : "free",
     fallbacks_used: uniqueFallbacks,
     fallbacks_attempted: uniqueAttempts,
     ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
@@ -869,9 +710,7 @@ export async function searchWeb(env, {
     response.auto = stillLow
       ? {
           escalated: uniqueAttempts.length > 0,
-          reason: env.ALLOW_PAID_WEBSEARCH === "1"
-            ? "paid_fallback_failed"
-            : "paid_fallback_disabled",
+          reason: "free_fallbacks_exhausted",
         }
       : uniqueAttempts.length
         ? { escalated: true, reason: "free_fallback_recovered" }
@@ -1077,6 +916,4 @@ export const __test = {
   matchesDomains,
   relevanceDetails,
   postProcess,
-  searchBrave,
-  searchExa,
 };

@@ -50,7 +50,7 @@ function createServer(env) {
         market: z.enum(["global", "SA", "AE", "CN"]).optional().default("global"),
         limit: z.number().int().min(1).max(20).optional().default(10),
         domains: z.array(z.string().min(1).max(253)).max(5).optional().default([]),
-        backend: z.enum(["free", "auto", "searxng", "brave", "exa"]).optional().default("free"),
+        backend: z.enum(["free", "auto", "searxng"]).optional().default("free"),
       },
       annotations: {
         readOnlyHint: true,
