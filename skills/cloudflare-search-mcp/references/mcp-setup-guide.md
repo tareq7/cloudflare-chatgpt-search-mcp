@@ -42,10 +42,7 @@ In `~/.claude/mcp.json` or `.claude/mcp.json`:
 {
   "mcpServers": {
     "tareq-search": {
-      "url": "https://<your-worker>.workers.dev/mcp",
-      "headers": {
-        "Authorization": "Bearer <YOUR_AGENT_TOKEN>"
-      }
+      "url": "https://<your-worker>.workers.dev/mcp"
     }
   }
 }

@@ -167,7 +167,7 @@ In `~/.claude/mcp.json` or project `.claude/mcp.json`:
 {
   "mcpServers": {
     "tareq-search": {
-      "url": "https://tareq-search-mcp.najetareqz.workers.dev/mcp"
+      "url": "https://<your-worker-subdomain>.workers.dev/mcp"
     }
   }
 }
@@ -195,7 +195,7 @@ Or for remote Worker:
 {
   "mcpServers": {
     "tareq-search": {
-      "url": "https://tareq-search-mcp.najetareqz.workers.dev/mcp"
+      "url": "https://<your-worker-subdomain>.workers.dev/mcp"
     }
   }
 }

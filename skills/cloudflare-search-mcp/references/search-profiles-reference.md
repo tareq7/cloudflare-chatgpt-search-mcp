@@ -80,4 +80,4 @@ Unlike traditional search MCPs that require paid API subscriptions (Brave, Exa, 
 1. **Canonical URL Resolution**: Both DuckDuckGo and Bing return wrapped tracking redirects (`duckduckgo.com/l/?uddg=...` and `bing.com/ck/a?...`). The engine unpacks these into canonical destination URLs before filtering, preventing attribution errors.
 2. **Strict Domain Filtering**: Domain filters are applied after canonical unwrapping and match exact subdomains.
 3. **Lexical Relevance Gating**: Suppresses noisy SERP results that do not match the query keywords.
-4. **Token Isolation**: If a private SearXNG instance uses `SEARXNG_BEARER_TOKEN`, the token is scoped strictly to the primary host and never forwarded to backup instances.
+4. **Host Isolation**: If a private SearXNG instance uses custom authorization, credentials are scoped strictly to the primary host and never forwarded to backup instances.
