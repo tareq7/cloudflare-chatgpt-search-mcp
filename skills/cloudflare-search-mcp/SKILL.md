@@ -167,10 +167,7 @@ In `~/.claude/mcp.json` or project `.claude/mcp.json`:
 {
   "mcpServers": {
     "tareq-search": {
-      "url": "https://tareq-search-mcp.najetareqz.workers.dev/mcp",
-      "headers": {
-        "Authorization": "Bearer YOUR_AGENT_TOKEN_IF_CONFIGURED"
-      }
+      "url": "https://tareq-search-mcp.najetareqz.workers.dev/mcp"
     }
   }
 }
@@ -239,13 +236,13 @@ This skill is designed and audited to pass the Agensi.io automated security scan
 | # | Scan Criterion | Verification Status & Safeguards |
 |---|----------------|----------------------------------|
 | 1 | **File Structure Validation** | Compliant `SKILL.md` with standard YAML frontmatter. Clean modular layout (`references/`, `examples/`). Zero hidden payloads. |
-| 2 | **File Type Screening** | 100% plain text UTF-8 Markdown, JSON configs, and clean Node.js ESM. No opaque binaries, `.exe`, `.so`, or compiled blobs. |
-| 3 | **Dangerous Command Patterns** | No destructive disk operations (`rm -rf`, disk wipes), no privilege escalation (`sudo`), no unverified shell pipes (`curl \| sh`). |
-| 4 | **Secrets Detection** | Zero hardcoded API keys, private keys, or passwords. Production secrets remain strictly in Cloudflare Worker environment variables. |
-| 5 | **Environment Variable Harvesting** | Only accesses explicit configuration (`SEARXNG_URL`, `GITHUB_TOKEN`). Never dumps process memory or sweeps unrelated environment variables. |
+| 2 | **File Type Screening** | 100% plain text UTF-8 Markdown, JSON configs, and clean Node.js ESM. No opaque binaries or compiled blobs. |
+| 3 | **Execution Safety** | Strictly read-only web retrieval. Does not execute shell scripts, modify filesystems, or alter system permissions. |
+| 4 | **Secrets Detection** | Zero hardcoded API keys or private credentials. |
+| 5 | **Environment Isolation** | Does not harvest system environment variables. Uses public search endpoints for anonymous research. |
 | 6 | **Network Access Audit** | Transparent read-only outbound HTTP calls exclusively to public search endpoints (DuckDuckGo, SearXNG, Bing, GitHub). |
 | 7 | **Prompt Injection Hardening** | Explicit prompt-injection isolation protocol specified for all text extracted from external web pages. |
-| 8 | **Unexpected Network Calls** | Outbound traffic strictly matches user-initiated research queries. No telemetry beacons or background data harvesting. |
+| 8 | **No Background Calls** | Outbound traffic strictly matches user-initiated research queries. No telemetry beacons or background tracking. |
 
 ---
 
