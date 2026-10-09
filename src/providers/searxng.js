@@ -10,7 +10,7 @@ import { parseSearxngHtml } from "../parsers/searxng-html.js";
 // - a primary origin's bearer token is never sent to a different instance
 const MAX_RESPONSE_BYTES = 600_000;
 const MAX_ATTEMPTS = 3;
-const DEFAULT_TIMEOUT_MS = 5500;
+const DEFAULT_TIMEOUT_MS = 3500;
 const LANGUAGES = { SA: "ar-SA", AE: "ar-AE", CN: "zh-CN", global: "en-US" };
 
 // Best-effort isolate-level cooldown. Workers isolates do not share this map.

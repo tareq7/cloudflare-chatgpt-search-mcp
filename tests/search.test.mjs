@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { searchWeb, __test } from "../src/search.js";
+import { searchWeb, multiSearch, __test } from "../src/search.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -526,3 +526,62 @@ test("market fallback variants cover China and UAE sourcing", () => {
     /الإمارات/,
   );
 });
+
+test("multiSearch executes queries concurrently and merges distinct results", async () => {
+  globalThis.fetch = async (input) => {
+    const u = new URL(String(input));
+    const query = u.searchParams.get("q") || "";
+    if (query.includes("TV straps")) {
+      return ok(ddgResult("TV safety strap listing", "https://amazon.sa/dp/B001", "Heavy duty C clamp straps"));
+    }
+    if (query.includes("Mac mini")) {
+      return ok(ddgResult("Mac mini M4 dock", "https://amazon.ae/dp/B002", "Aluminum stand hub dock"));
+    }
+    return ok("");
+  };
+
+  const res = await multiSearch({}, {
+    queries: ["TV straps", "Mac mini"],
+    mode: "web",
+    market: "global",
+    limit_per_query: 3,
+  });
+
+  assert.equal(res.queries.length, 2);
+  assert.equal(res.per_query.length, 2);
+  assert.ok(res.results.length >= 2);
+  assert.ok(res.results.some((r) => r.domain === "amazon.sa"));
+  assert.ok(res.results.some((r) => r.domain === "amazon.ae"));
+});
+
+test("multiSearch isolates errors so a failed query does not corrupt healthy query results", async () => {
+  globalThis.fetch = async (input) => {
+    const u = new URL(String(input));
+    const query = u.searchParams.get("q") || "";
+    if (query.includes("exploding query")) {
+      throw new Error("Simulated upstream network fault");
+    }
+    return ok(ddgResult("Healthy query safe result", "https://example.com/safe", "Healthy query working documentation snippet"));
+  };
+
+  const res = await multiSearch({}, {
+    queries: ["exploding query", "healthy query"],
+    mode: "web",
+    market: "global",
+    limit_per_query: 3,
+  });
+
+  assert.equal(res.queries.length, 2);
+  assert.equal(res.per_query.length, 2);
+  assert.equal(res.per_query[0].results.length, 0);
+  assert.ok(res.results.length >= 1);
+  assert.equal(res.results[0].domain, "example.com");
+});
+
+test("multiSearch handles empty queries array gracefully", async () => {
+  const res = await multiSearch({}, { queries: [] });
+  assert.deepEqual(res.queries, []);
+  assert.deepEqual(res.results, []);
+  assert.deepEqual(res.per_query, []);
+});
+

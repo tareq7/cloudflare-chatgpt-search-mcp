@@ -3,7 +3,7 @@ import { parseSearchRss } from "./parsers/rss.js";
 import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
 
 const UA = "CloudflareSearchMCP/1.0";
-const PROVIDER_TIMEOUT_MS = 8000;
+const PROVIDER_TIMEOUT_MS = 5000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1_500_000;
 
 const MARKET = {
@@ -117,6 +117,13 @@ function normalizeUrl(raw, depth = 0) {
           decodeBingTarget(u.searchParams.get("url")) ||
           decodeBingTarget(u.searchParams.get("r"));
         return target ? normalizeUrl(target, depth + 1) : "";
+      }
+      if (u.pathname.includes("/news/") || u.pathname.includes("apiclick")) {
+        const rawTarget = u.searchParams.get("url") || u.searchParams.get("r");
+        if (rawTarget) {
+          const target = decodeBingTarget(rawTarget) || rawTarget;
+          return normalizeUrl(target, depth + 1);
+        }
       }
       return "";
     }
@@ -497,7 +504,7 @@ async function searchBingHtml(query, limit, market) {
   return results;
 }
 
-async function searchNews(searchQuery, relevanceQuery, limit, market, domains = []) {
+async function searchNews(env, searchQuery, relevanceQuery, limit, market, domains = []) {
   const cc = MARKET[market]?.cc || "US";
   const [google, bing] = await Promise.allSettled([
     fetchText(
@@ -526,7 +533,51 @@ async function searchNews(searchQuery, relevanceQuery, limit, market, domains = 
     }
   }
 
-  return postProcess(out, relevanceQuery, domains, limit);
+  let processed = postProcess(out, relevanceQuery, domains, limit);
+
+  if (processed.results.length === 0) {
+    const newsFallbacks = [];
+    const newsQuery = (relevanceQuery.trim() + " news" + domainClause(domains)).trim();
+
+    if (env && (env.SEARXNG_URL || env.SEARXNG_URLS || env.SEARXNG_DEFAULT_URL || env.DEFAULT_SEARXNG_URL)) {
+      try {
+        const searxResults = await searchSearxng(env, {
+          query: newsQuery,
+          market,
+          mode: "news",
+          limit: limit * 2,
+        });
+        if (searxResults?.length) newsFallbacks.push(...searxResults);
+      } catch {}
+    }
+
+    if (newsFallbacks.length === 0) {
+      try {
+        const ddgResults = await searchDuckDuckGo(newsQuery, limit * 2);
+        if (ddgResults?.length) newsFallbacks.push(...ddgResults);
+      } catch {}
+    }
+
+    if (newsFallbacks.length === 0) {
+      try {
+        const bingResults = await searchBingHtml(newsQuery, limit * 2, market);
+        if (bingResults?.length) newsFallbacks.push(...bingResults);
+      } catch {}
+    }
+
+    if (newsFallbacks.length === 0 && domains?.length > 0) {
+      try {
+        const broadNews = await searchDuckDuckGo((relevanceQuery.trim() + " news").trim(), limit * 3);
+        if (broadNews?.length) newsFallbacks.push(...broadNews);
+      } catch {}
+    }
+
+    if (newsFallbacks.length) {
+      processed = postProcess(newsFallbacks, relevanceQuery, domains, limit);
+    }
+  }
+
+  return processed;
 }
 
 
@@ -590,7 +641,7 @@ export async function searchWeb(env, {
   }
 
   if (mode === "news") {
-    const news = await searchNews(q, query, n, market, domains);
+    const news = await searchNews(env, q, query, n, market, domains);
     return {
       query: q,
       search_queries: [q],
@@ -726,24 +777,52 @@ export async function multiSearch(env, {
   market = "global",
   limit_per_query = 6,
 }) {
-  const list = queries.filter(Boolean).slice(0, 6);
-  // Multi-query searches must not burst traffic across shared public instances.
-  const runOne = (query) => searchWeb(env, {
-    query,
-    mode,
-    market,
-    limit: Math.max(1, Math.min(Number(limit_per_query) || 6, 10)),
-    backend: "auto",
-  });
-  const responses = [];
-  if (env.SEARXNG_URL || env.SEARXNG_URLS || env.SEARXNG_DEFAULT_URL || env.DEFAULT_SEARXNG_URL) {
-    for (const query of list) responses.push(await runOne(query));
-  } else {
-    responses.push(...await Promise.all(list.map(runOne)));
+  const list = [...new Set((queries || []).filter(Boolean).map((q) => String(q).trim()))]
+    .filter(Boolean)
+    .slice(0, 6);
+  if (!list.length) {
+    return { queries: [], mode, market, results: [], per_query: [] };
   }
+  const perQueryLimit = Math.max(1, Math.min(Number(limit_per_query) || 6, 10));
+
+  const runOne = async (query) => {
+    try {
+      return await searchWeb(env, {
+        query,
+        mode,
+        market,
+        limit: perQueryLimit,
+        backend: "auto",
+      });
+    } catch (error) {
+      return {
+        query,
+        search_queries: [query],
+        backend: "error",
+        results: [],
+        quality: { top_score: 0, average_top3: 0, kept: 0, candidates: 0, discarded_low_relevance: 0 },
+        errors: [String(error?.message || error)],
+      };
+    }
+  };
+
+  const settled = await Promise.allSettled(list.map(runOne));
+  const responses = settled.map((s, i) =>
+    s.status === "fulfilled"
+      ? s.value
+      : {
+          query: list[i],
+          search_queries: [list[i]],
+          backend: "error",
+          results: [],
+          quality: { top_score: 0, average_top3: 0, kept: 0, candidates: 0, discarded_low_relevance: 0 },
+          errors: [String(s.reason?.message || s.reason)],
+        }
+  );
+
   const combined = dedupe(
-    responses.flatMap((response) => response.results),
-    Math.min(30, list.length * limit_per_query),
+    responses.flatMap((response) => response.results || []),
+    Math.min(30, list.length * perQueryLimit),
   );
   return { queries: list, mode, market, results: combined, per_query: responses };
 }

@@ -41,7 +41,7 @@ export function parseSearchRss(xml, { source, limit = 10 }) {
   }
   const rawItems = channel.item === undefined ? [] : Array.isArray(channel.item) ? channel.item : [channel.item];
   return rawItems.slice(0, limit).map((item) => {
-    const publisher = item.source;
+    const publisher = item.source || item["News:Source"] || item["news:source"];
     return {
       title: plain(item.title),
       url: textValue(item.link).trim(),
