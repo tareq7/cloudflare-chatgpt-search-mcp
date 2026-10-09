@@ -2,7 +2,7 @@ import { searchSearxng } from "./providers/searxng.js";
 import { parseSearchRss } from "./parsers/rss.js";
 import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
 
-const UA = "CloudflareSearchMCP/1.0";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 const PROVIDER_TIMEOUT_MS = 5000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1_500_000;
 
@@ -296,12 +296,23 @@ function postProcess(results, query, domains, limit) {
   const terms = queryTerms(query);
   const threshold = terms.length <= 1 ? 0.2 : terms.length <= 3 ? 0.18 : 0.14;
   const minimumMatches = terms.length >= 4 ? 2 : terms.length ? 1 : 0;
-  const relevant = canonical
+  let relevant = canonical
     .filter((result) =>
       result._score >= threshold && result._matches >= minimumMatches
     )
     .sort((a, b) => b._score - a._score)
     .slice(0, limit);
+
+  if (!relevant.length && canonical.length > 0) {
+    relevant = canonical
+      .filter((result) => result._matches >= 1)
+      .sort((a, b) => b._score - a._score)
+      .slice(0, limit);
+  }
+
+  if (!relevant.length && canonical.length > 0) {
+    relevant = canonical.slice(0, limit);
+  }
 
   const topScore = relevant[0]?._score || canonical[0]?._score || 0;
   const avgTop3 = relevant.length
@@ -734,6 +745,23 @@ export async function searchWeb(env, {
         })),
       );
       fallbacksUsed.push("market-localized");
+      processed = postProcess(rawResults, query, domains, n);
+    }
+  }
+
+  const cleanQuery = (query.trim() + domainClause(domains)).slice(0, 1000);
+  if (lowQuality() && cleanQuery !== q && cleanQuery !== marketQuery) {
+    fallbacksAttempted.push("clean-query");
+    const cleanSearches = [searchDuckDuckGo(cleanQuery, cap), searchBingHtml(cleanQuery, cap, market)];
+    const cleanResults = await collectSearches(
+      cleanSearches,
+      errors,
+      "clean-fallback",
+    );
+    searchQueries.push(cleanQuery);
+    if (cleanResults.length) {
+      rawResults.push(...cleanResults);
+      fallbacksUsed.push("clean-query");
       processed = postProcess(rawResults, query, domains, n);
     }
   }
