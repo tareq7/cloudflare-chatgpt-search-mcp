@@ -5,11 +5,13 @@
   "description": "Cloudflare-hosted remote search MCP for ChatGPT",
   "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev --remote",
+    "deploy": "npx -y wrangler@latest deploy",
+    "dev": "npx -y wrangler@latest dev --remote",
     "test": "node --test",
-    "check": "node --check src/search.js && node --check src/index.js",
-    "check:deploy": "wrangler deploy --dry-run"
+    "check": "node --check src/search.js && node --check src/server.js && node --check src/index.js && node --check scripts/stdio-server.mjs && node --check scripts/package-agensi-skill.mjs",
+    "check:deploy": "npx -y wrangler@latest deploy --dry-run",
+    "start:stdio": "node scripts/stdio-server.mjs",
+    "package:skill": "node scripts/package-agensi-skill.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^1.2.1",

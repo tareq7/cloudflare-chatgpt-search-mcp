@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "tareq-search": {
+      "command": "node",
+      "args": ["${workspaceFolder}/scripts/stdio-server.mjs"]
+    }
+  }
+}

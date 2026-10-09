@@ -1,8 +1,41 @@
-# Cloudflare ChatGPT Search MCP
+# Cloudflare Search MCP & Agent Skill
 
-A remote, read-only Model Context Protocol (MCP) search server designed to run on **Cloudflare Workers** and connect to **ChatGPT web** over Streamable HTTP.
+A Model Context Protocol (MCP) search server and universal **Agent Skill** (`SKILL.md`) designed to provide deep, unmetered web research across **Claude Code, Cursor, GitHub Copilot, Codex CLI, Windsurf, and ChatGPT Web**.
+
+Runs on a **100% free search engine stack** (SearXNG JSON/HTML metasearch, DuckDuckGo HTML & Lite, canonicalized Bing organic HTML, Google/Bing News RSS, and GitHub API). It requires **zero paid search API keys** (no Exa or Brave billing).
+
+Supports dual-mode execution:
+1. **Remote Cloudflare Worker** (Streamable HTTP / SSE with OAuth 2.1 for ChatGPT and Bearer token auth for agents).
+2. **Local Stdio MCP Process** (zero-cloud deployment for local agents via Node.js).
+
+## Quickstart for AI Coding Agents
+
+### Claude Code (One-Liner)
+```bash
+claude mcp add tareq-search -- node ./scripts/stdio-server.mjs
+```
+
+### Cursor (`.cursor/mcp.json`)
+```json
+{
+  "mcpServers": {
+    "tareq-search": {
+      "command": "node",
+      "args": ["${workspaceFolder}/scripts/stdio-server.mjs"]
+    }
+  }
+}
+```
+
+### Agensi.io Skill Package
+To package for the [Agensi.io](https://agensi.io) marketplace:
+```bash
+npm run package:skill
+```
+The validated ZIP archive will be created at `dist/cloudflare-search-mcp-skill.zip`.
 
 ## Features
+
 
 - OAuth 2.1 + PKCE using Cloudflare's Workers OAuth Provider
 - ChatGPT CIMD allowlist: the authorization endpoint only accepts ChatGPT client metadata documents
