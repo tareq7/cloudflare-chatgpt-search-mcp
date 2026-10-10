@@ -758,12 +758,12 @@ export async function searchWeb(env, {
     }
   }
 
-  const ddgChallenged = () =>
-    errors.some((e) => /202|challenge/i.test(e));
+  const ddgBlocked = () =>
+    errors.some((e) => /202|522|challenge|duckduckgo/i.test(e));
 
   if (lowQuality()) {
     fallbacksAttempted.push("duckduckgo-lite", "bing-html");
-    const fallbackSearches = ddgChallenged()
+    const fallbackSearches = ddgBlocked()
       ? [searchBingHtml(q, cap, market)]
       : [searchDuckDuckGoLite(q, cap), searchBingHtml(q, cap, market)];
     const fallbackResults = await collectSearches(
@@ -790,7 +790,7 @@ export async function searchWeb(env, {
   if (lowQuality() && marketQuery && marketQuery !== q) {
     fallbacksAttempted.push("market-localized");
     const marketSearches = [];
-    if (!ddgChallenged()) {
+    if (!ddgBlocked()) {
       marketSearches.push(searchDuckDuckGo(marketQuery, cap));
     }
     if (env.ENABLE_BING_RSS === "1") {
@@ -818,7 +818,7 @@ export async function searchWeb(env, {
   const cleanQuery = (query.trim() + domainClause(domains)).slice(0, 1000);
   if (lowQuality() && cleanQuery !== q && cleanQuery !== marketQuery) {
     fallbacksAttempted.push("clean-query");
-    const cleanSearches = ddgChallenged()
+    const cleanSearches = ddgBlocked()
       ? [searchBingHtml(cleanQuery, cap, market)]
       : [searchDuckDuckGo(cleanQuery, cap), searchBingHtml(cleanQuery, cap, market)];
     const cleanResults = await collectSearches(
