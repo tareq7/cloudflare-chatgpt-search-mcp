@@ -28,6 +28,83 @@ const LOCAL_FALLBACKS = {
   },
 };
 
+class ProviderQueue {
+  constructor({ maxConcurrent = 1, minIntervalMs = 150, jitterMs = 100 } = {}) {
+    this.maxConcurrent = maxConcurrent;
+    this.minIntervalMs = minIntervalMs;
+    this.jitterMs = jitterMs;
+    this.active = 0;
+    this.queue = [];
+    this.lastCompletionTime = 0;
+  }
+
+  async run(task) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ task, resolve, reject });
+      this._drain();
+    });
+  }
+
+  async _drain() {
+    if (this.active >= this.maxConcurrent || this.queue.length === 0) return;
+    this.active++;
+    const { task, resolve, reject } = this.queue.shift();
+
+    const now = Date.now();
+    const elapsed = now - this.lastCompletionTime;
+    const targetDelay = this.minIntervalMs + (this.jitterMs ? Math.floor(Math.random() * this.jitterMs) : 0);
+    if (elapsed < targetDelay) {
+      await new Promise((r) => setTimeout(r, targetDelay - elapsed));
+    }
+
+    try {
+      const res = await task();
+      resolve(res);
+    } catch (err) {
+      reject(err);
+    } finally {
+      this.lastCompletionTime = Date.now();
+      this.active--;
+      this._drain();
+    }
+  }
+}
+
+const ddgQueue = new ProviderQueue({ maxConcurrent: 1, minIntervalMs: 150, jitterMs: 100 });
+const bingQueue = new ProviderQueue({ maxConcurrent: 2, minIntervalMs: 80, jitterMs: 60 });
+
+const providerCooldowns = new Map();
+
+function markProviderCooldown(provider, durationMs = 25_000) {
+  providerCooldowns.set(provider, Date.now() + durationMs);
+}
+
+function isProviderCooldown(provider) {
+  const until = providerCooldowns.get(provider);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    providerCooldowns.delete(provider);
+    return false;
+  }
+  return true;
+}
+
+export function __clearProviderCooldownsForTests() {
+  providerCooldowns.clear();
+}
+
+function isOfficialDocumentation(result) {
+  const url = String(result?.url || "").toLowerCase();
+  const domain = String(result?.domain || "").toLowerCase();
+  const title = String(result?.title || "").toLowerCase();
+
+  if (/^(docs?|developers?|api|help|manual|wiki|man)\./i.test(domain)) return true;
+  if (/readthedocs\.io|gitbook\.io|github\.io/i.test(domain)) return true;
+  if (/\/(docs?|documentation|api|guides?|manual|reference|specs?|rfc)\b/i.test(url)) return true;
+  if (/\b(docs?|documentation|developer guide|api reference|official docs?)\b/i.test(title)) return true;
+  return false;
+}
+
 function decodeHtml(value = "") {
   return value
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
@@ -286,10 +363,11 @@ function dedupe(results, limit, perDomainLimit = 3, domains = []) {
   return out;
 }
 
-function postProcess(results, query, domains, limit) {
+function postProcess(results, query, domains, limit, mode = "web") {
   const perDomainLimit = domains?.length ? Math.max(limit, 10) : 3;
   const terms = queryTerms(query);
   const termCount = terms.length;
+  const querySpecifiesDocs = mode === "technical" || /\b(docs?|documentation|guide|reference|api|manual|spec|rfc|sdk)\b/i.test(query);
 
   const canonical = dedupe(
     results,
@@ -301,13 +379,37 @@ function postProcess(results, query, domains, limit) {
     const relevance = relevanceDetails(result, relevanceQuery);
     const isHomepage = isGenericHomepage(result.url);
     const isClutterHomepage = isHomepage && termCount >= 2 && relevance.matches < 2;
+
+    const isGitHub = result.domain === "github.com" || String(result.source || "").includes("github");
+    const isClutterGitHub = isGitHub && (
+      /\/login|\/signup|\/features|\/topics|\/explore|\/pricing|\/trending/i.test(result.url) ||
+      (termCount >= 3 && relevance.matches < 2)
+    );
+
+    const isDoc = isOfficialDocumentation(result);
+    let score = (isClutterHomepage || isClutterGitHub) ? 0 : relevance.score;
+    let matches = (isClutterHomepage || isClutterGitHub) ? 0 : relevance.matches;
+
+    if (querySpecifiesDocs && isDoc && matches >= 1) {
+      score = Math.min(1, score * 1.35 + 0.15);
+    }
+
     return {
       ...result,
-      _score: isClutterHomepage ? 0 : relevance.score,
-      _matches: isClutterHomepage ? 0 : relevance.matches,
+      _score: score,
+      _matches: matches,
       _isHomepage: isHomepage,
+      _isDoc: isDoc,
+      _isGitHub: isGitHub,
     };
   });
+
+  const docSort = (a, b) => {
+    if (querySpecifiesDocs && a._isDoc !== b._isDoc && Math.abs(b._score - a._score) < 0.25) {
+      return b._isDoc ? 1 : -1;
+    }
+    return b._score - a._score;
+  };
 
   const threshold = termCount <= 1 ? 0.2 : termCount <= 3 ? 0.18 : 0.14;
   const minimumMatches = termCount >= 4 ? 2 : termCount ? 1 : 0;
@@ -315,7 +417,7 @@ function postProcess(results, query, domains, limit) {
     .filter((result) =>
       result._score >= threshold && result._matches >= minimumMatches
     )
-    .sort((a, b) => b._score - a._score)
+    .sort(docSort)
     .slice(0, limit);
 
   if (!relevant.length && canonical.length > 0) {
@@ -327,7 +429,7 @@ function postProcess(results, query, domains, limit) {
         result._matches >= fallbackMinMatches &&
         !result._isHomepage
       )
-      .sort((a, b) => b._score - a._score)
+      .sort(docSort)
       .slice(0, limit);
   }
 
@@ -342,6 +444,8 @@ function postProcess(results, query, domains, limit) {
       _score,
       _matches,
       _isHomepage,
+      _isDoc,
+      _isGitHub,
       _relevanceQuery,
       ...result
     }) => result),
@@ -476,51 +580,82 @@ async function fetchText(url, init = {}, limits = {}) {
 }
 
 async function searchDuckDuckGo(query, limit) {
-  try {
-    const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
-    const html = await fetchText(url, { method: "GET" });
-    if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-      throw new Error("DuckDuckGo HTML challenge encountered.");
-    }
-    const results = parseDuckDuckGoHtml(html, limit)
-      .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
-      .filter((item) => item.url);
-
-    if (results.length) return results;
-    if (/result__a|result__snippet/i.test(html)) {
-      throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
-    }
-  } catch {
-    // If html.duckduckgo.com encounters a challenge, 202, or fails, immediately try Lite
+  if (isProviderCooldown("duckduckgo")) {
+    throw new Error("DuckDuckGo throttled (HTTP 202 cooldown active).");
   }
-  return searchDuckDuckGoLite(query, limit);
+  return ddgQueue.run(async () => {
+    if (isProviderCooldown("duckduckgo")) {
+      throw new Error("DuckDuckGo throttled (HTTP 202 cooldown active).");
+    }
+    try {
+      const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+      const html = await fetchText(url, { method: "GET" });
+      if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+        throw new Error("DuckDuckGo HTML challenge encountered.");
+      }
+      const results = parseDuckDuckGoHtml(html, limit)
+        .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+        .filter((item) => item.url);
+
+      if (results.length) return results;
+      if (/result__a|result__snippet/i.test(html)) {
+        throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
+      }
+    } catch {
+      // If html.duckduckgo.com encounters a challenge, 202, or fails, add jitter and try Lite
+      const jitter = 100 + Math.floor(Math.random() * 150);
+      await new Promise((r) => setTimeout(r, jitter));
+    }
+    return searchDuckDuckGoLite(query, limit, false);
+  });
 }
 
-async function searchDuckDuckGoLite(query, limit) {
-  let html = "";
-  try {
-    const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
-    html = await fetchText(url, { method: "GET" });
-    if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-      throw new Error("DuckDuckGo Lite challenge encountered.");
+async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
+  const execute = async () => {
+    if (isProviderCooldown("duckduckgo")) {
+      throw new Error("DuckDuckGo throttled (HTTP 202 cooldown active).");
     }
-  } catch {
-    html = await fetchText("https://lite.duckduckgo.com/lite/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": "https://lite.duckduckgo.com",
-        "Referer": "https://lite.duckduckgo.com/",
-      },
-      body: new URLSearchParams({ q: query }).toString(),
-    });
-    if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-      throw new Error("DuckDuckGo Lite challenge encountered.");
+    let html = "";
+    try {
+      const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
+      html = await fetchText(url, { method: "GET" });
+      if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+        throw new Error("DuckDuckGo Lite challenge encountered.");
+      }
+    } catch {
+      const jitter = 100 + Math.floor(Math.random() * 150);
+      await new Promise((r) => setTimeout(r, jitter));
+
+      try {
+        html = await fetchText("https://lite.duckduckgo.com/lite/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://lite.duckduckgo.com",
+            "Referer": "https://lite.duckduckgo.com/",
+          },
+          body: new URLSearchParams({ q: query }).toString(),
+        });
+        if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+          markProviderCooldown("duckduckgo", 25_000);
+          throw new Error("DuckDuckGo Lite challenge encountered (throttled).");
+        }
+      } catch (postErr) {
+        if (/202|challenge/i.test(String(postErr?.message || postErr))) {
+          markProviderCooldown("duckduckgo", 25_000);
+        }
+        throw postErr;
+      }
     }
+    return parseDuckDuckGoLite(html, limit)
+      .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+      .filter((item) => item.url);
+  };
+
+  if (needsQueue) {
+    return ddgQueue.run(execute);
   }
-  return parseDuckDuckGoLite(html, limit)
-    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
-    .filter((item) => item.url);
+  return execute();
 }
 
 function parseRss(xml, source, limit) {
@@ -552,23 +687,25 @@ async function searchBingRss(query, limit, market) {
 }
 
 async function searchBingHtml(query, limit, market) {
-  const p = new URLSearchParams({
-    q: query,
-    count: String(Math.min(limit + 4, 20)),
+  return bingQueue.run(async () => {
+    const p = new URLSearchParams({
+      q: query,
+      count: String(Math.min(limit + 4, 20)),
+    });
+    const cc = MARKET[market]?.cc;
+    if (cc) p.set("cc", cc);
+    p.set("setlang", "en");
+
+    const html = await fetchText("https://www.bing.com/search?" + p.toString());
+    const results = parseBingHtml(html, limit)
+      .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+      .filter((item) => item.url);
+
+    if (!results.length && /\bb_algo\b/i.test(html)) {
+      throw new Error("Bing parser found result markup but parsed zero results.");
+    }
+    return results;
   });
-  const cc = MARKET[market]?.cc;
-  if (cc) p.set("cc", cc);
-  p.set("setlang", "en");
-
-  const html = await fetchText("https://www.bing.com/search?" + p.toString());
-  const results = parseBingHtml(html, limit)
-    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
-    .filter((item) => item.url);
-
-  if (!results.length && /\bb_algo\b/i.test(html)) {
-    throw new Error("Bing parser found result markup but parsed zero results.");
-  }
-  return results;
 }
 
 async function searchNews(env, searchQuery, relevanceQuery, limit, market, domains = []) {
@@ -672,8 +809,11 @@ export async function searchWeb(env, {
   market = "global",
   limit = 10,
   domains = [],
-  backend = "free",
+  backend = "auto",
 }) {
+  if (backend === "brave") {
+    backend = "auto";
+  }
   const n = Math.max(1, Math.min(Number(limit) || 10, 20));
   const cap = Math.min(n * 2, 20);
   const q = buildQuery(query, mode, market, domains);
@@ -683,7 +823,7 @@ export async function searchWeb(env, {
   );
   const searxngDiagnostics = { attempted: [], skipped: [], selected: null };
   const searxngUseful = (items) => {
-    const quality = postProcess(items, query, domains, n);
+    const quality = postProcess(items, query, domains, n, mode);
     return quality.results.length >= Math.min(3, n) &&
       quality.quality.top_score >= 0.34 &&
       quality.quality.average_top3 >= 0.22;
@@ -695,7 +835,7 @@ export async function searchWeb(env, {
         query: q, market, mode, limit: cap,
         isUseful: searxngUseful, diagnostics: searxngDiagnostics,
       }),
-      query, domains, n,
+      query, domains, n, mode,
     );
     return {
       query: q,
@@ -723,13 +863,16 @@ export async function searchWeb(env, {
   const fallbacksAttempted = [];
   const searchQueries = [q];
   const hasSearxng = searxngEnabled;
+  const ddgAvailable = !isProviderCooldown("duckduckgo");
   const primarySearches = hasSearxng
     ? [searchSearxng(env, {
         query: q, market, mode, limit: cap,
         isUseful: searxngUseful, diagnostics: searxngDiagnostics,
       })]
-    : [searchDuckDuckGo(q, cap)];
-  if (!hasSearxng && env.ENABLE_BING_RSS === "1") {
+    : (ddgAvailable
+      ? [searchDuckDuckGo(q, cap)]
+      : [searchBingHtml(q, cap, market)]);
+  if (!hasSearxng && ddgAvailable && env.ENABLE_BING_RSS === "1") {
     primarySearches.push(searchBingRss(q, cap, market));
   }
   let rawResults = await collectSearches(
@@ -738,7 +881,7 @@ export async function searchWeb(env, {
     "primary",
   );
 
-  let processed = postProcess(rawResults, query, domains, n);
+  let processed = postProcess(rawResults, query, domains, n, mode);
   const minimumUseful = Math.min(3, n);
   const lowQuality = () =>
     processed.results.length < minimumUseful ||
@@ -754,18 +897,23 @@ export async function searchWeb(env, {
     if (ddg.length) {
       rawResults.push(...ddg);
       fallbacksUsed.push("duckduckgo");
-      processed = postProcess(rawResults, query, domains, n);
+      processed = postProcess(rawResults, query, domains, n, mode);
     }
   }
 
   const ddgBlocked = () =>
-    errors.some((e) => /202|522|challenge|duckduckgo/i.test(e));
+    isProviderCooldown("duckduckgo") ||
+    errors.some((e) => /202|522|challenge|duckduckgo|throttled/i.test(e));
 
   if (lowQuality()) {
-    fallbacksAttempted.push("duckduckgo-lite", "bing-html");
-    const fallbackSearches = ddgBlocked()
-      ? [searchBingHtml(q, cap, market)]
-      : [searchDuckDuckGoLite(q, cap), searchBingHtml(q, cap, market)];
+    const fallbackSearches = [];
+    if (!ddgBlocked()) {
+      fallbacksAttempted.push("duckduckgo-lite");
+      fallbackSearches.push(searchDuckDuckGoLite(q, cap));
+    }
+    fallbacksAttempted.push("bing-html");
+    fallbackSearches.push(searchBingHtml(q, cap, market));
+
     const fallbackResults = await collectSearches(
       fallbackSearches,
       errors,
@@ -782,7 +930,7 @@ export async function searchWeb(env, {
       if (fallbackSources.has("bing-html")) {
         fallbacksUsed.push("bing-html");
       }
-      processed = postProcess(rawResults, query, domains, n);
+      processed = postProcess(rawResults, query, domains, n, mode);
     }
   }
 
@@ -793,6 +941,7 @@ export async function searchWeb(env, {
     if (!ddgBlocked()) {
       marketSearches.push(searchDuckDuckGo(marketQuery, cap));
     }
+    marketSearches.push(searchBingHtml(marketQuery, cap, market));
     if (env.ENABLE_BING_RSS === "1") {
       marketSearches.push(searchBingRss(marketQuery, cap, market));
     }
@@ -811,16 +960,17 @@ export async function searchWeb(env, {
         })),
       );
       fallbacksUsed.push("market-localized");
-      processed = postProcess(rawResults, query, domains, n);
+      processed = postProcess(rawResults, query, domains, n, mode);
     }
   }
 
   const cleanQuery = (query.trim() + domainClause(domains)).slice(0, 1000);
   if (lowQuality() && cleanQuery !== q && cleanQuery !== marketQuery) {
     fallbacksAttempted.push("clean-query");
-    const cleanSearches = ddgBlocked()
-      ? [searchBingHtml(cleanQuery, cap, market)]
-      : [searchDuckDuckGo(cleanQuery, cap), searchBingHtml(cleanQuery, cap, market)];
+    const cleanSearches = [searchBingHtml(cleanQuery, cap, market)];
+    if (!ddgBlocked()) {
+      cleanSearches.push(searchDuckDuckGo(cleanQuery, cap));
+    }
     const cleanResults = await collectSearches(
       cleanSearches,
       errors,
@@ -830,7 +980,7 @@ export async function searchWeb(env, {
     if (cleanResults.length) {
       rawResults.push(...cleanResults);
       fallbacksUsed.push("clean-query");
-      processed = postProcess(rawResults, query, domains, n);
+      processed = postProcess(rawResults, query, domains, n, mode);
     }
   }
 
@@ -847,7 +997,7 @@ export async function searchWeb(env, {
         }));
         rawResults.push(...ghResults);
         fallbacksUsed.push("github-technical");
-        processed = postProcess(rawResults, query, domains, n);
+        processed = postProcess(rawResults, query, domains, n, mode);
       }
     } catch (e) {
       errors.push("github-fallback: " + String(e.message || e));
@@ -895,6 +1045,9 @@ export async function multiSearch(env, {
   domains = [],
   backend = "auto",
 }) {
+  if (backend === "brave") {
+    backend = "auto";
+  }
   const list = [...new Set((queries || []).filter(Boolean).map((q) => String(q).trim()))]
     .filter(Boolean)
     .slice(0, 6);
@@ -1153,5 +1306,12 @@ export const __test = {
   relevanceDetails,
   postProcess,
   isGenericHomepage,
+  isOfficialDocumentation,
   searchDuckDuckGoLite,
+  ProviderQueue,
+  ddgQueue,
+  bingQueue,
+  isProviderCooldown,
+  markProviderCooldown,
+  __clearProviderCooldownsForTests,
 };

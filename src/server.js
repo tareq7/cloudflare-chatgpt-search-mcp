@@ -41,7 +41,7 @@ export function createServer(env = (typeof process !== "undefined" ? process.env
         market: z.enum(["global", "SA", "AE", "CN"]).optional().default("global"),
         limit: z.number().int().min(1).max(20).optional().default(10),
         domains: z.array(z.string().min(1).max(253)).max(5).optional().default([]),
-        backend: z.enum(["free", "auto", "searxng"]).optional().default("free"),
+        backend: z.enum(["free", "auto", "searxng", "brave"]).optional().default("auto"),
       },
       annotations: {
         readOnlyHint: true,
@@ -70,7 +70,7 @@ export function createServer(env = (typeof process !== "undefined" ? process.env
         market: z.enum(["global", "SA", "AE", "CN"]).optional().default("global"),
         limit_per_query: z.number().int().min(1).max(10).optional().default(6),
         domains: z.array(z.string().min(1).max(253)).max(5).optional().default([]),
-        backend: z.enum(["free", "auto", "searxng"]).optional().default("auto"),
+        backend: z.enum(["free", "auto", "searxng", "brave"]).optional().default("auto"),
       },
       annotations: {
         readOnlyHint: true,

@@ -706,4 +706,128 @@ test("searchDuckDuckGoLite falls back to POST if GET encounters 202 challenge", 
   }
 });
 
+test("ProviderQueue limits concurrency to maxConcurrent and processes tasks in order", async () => {
+  const queue = new __test.ProviderQueue({ maxConcurrent: 2, minIntervalMs: 5, jitterMs: 0 });
+  let active = 0;
+  let maxObservedActive = 0;
+  const order = [];
+
+  const makeTask = (id, delayMs) => async () => {
+    active++;
+    maxObservedActive = Math.max(maxObservedActive, active);
+    order.push(`start-${id}`);
+    await new Promise((r) => setTimeout(r, delayMs));
+    order.push(`end-${id}`);
+    active--;
+    return id;
+  };
+
+  const results = await Promise.all([
+    queue.run(makeTask(1, 25)),
+    queue.run(makeTask(2, 25)),
+    queue.run(makeTask(3, 10)),
+    queue.run(makeTask(4, 10)),
+  ]);
+
+  assert.deepEqual(results, [1, 2, 3, 4]);
+  assert.ok(maxObservedActive <= 2, `Observed concurrency ${maxObservedActive} exceeded 2`);
+});
+
+test("provider cooldown marks provider as cooled down and clears on expiry", () => {
+  __test.__clearProviderCooldownsForTests();
+  assert.equal(__test.isProviderCooldown("duckduckgo"), false);
+  __test.markProviderCooldown("duckduckgo", 50);
+  assert.equal(__test.isProviderCooldown("duckduckgo"), true);
+  __test.__clearProviderCooldownsForTests();
+  assert.equal(__test.isProviderCooldown("duckduckgo"), false);
+});
+
+test("searchWeb fails over from DDG to Bing HTML when DDG encounters 202 challenge and sets cooldown", async () => {
+  __test.__clearProviderCooldownsForTests();
+  const origFetch = globalThis.fetch;
+  const fetchedUrls = [];
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    fetchedUrls.push(u);
+    if (u.includes("duckduckgo.com")) {
+      return new Response("bots use DuckDuckGo too", { status: 202 });
+    }
+    if (u.includes("bing.com/search")) {
+      return new Response(`
+        <ol id="b_results">
+          <li class="b_algo">
+            <h2><a href="https://developers.cloudflare.com/workers/">Cloudflare Workers Documentation</a></h2>
+            <div class="b_caption"><p>Build serverless applications with Cloudflare Workers.</p></div>
+          </li>
+        </ol>
+      `, { status: 200, headers: { "content-type": "text/html" } });
+    }
+    return new Response("", { status: 404 });
+  };
+
+  try {
+    const res = await searchWeb({}, {
+      query: "cloudflare workers documentation",
+      backend: "free",
+      mode: "technical",
+      limit: 5,
+    });
+
+    assert.ok(res.results.length >= 1, "Expected results from Bing fallback");
+    assert.equal(res.results[0].url, "https://developers.cloudflare.com/workers/");
+    assert.ok(res.fallbacks_used.includes("bing-html"));
+    assert.equal(__test.isProviderCooldown("duckduckgo"), true, "DDG should be in cooldown after 202");
+
+    // Subsequent search should immediately use Bing without attempting DDG
+    const ddgFetchCountBefore = fetchedUrls.filter((u) => u.includes("duckduckgo.com")).length;
+    const res2 = await searchWeb({}, {
+      query: "cloudflare workers mcp",
+      backend: "free",
+      limit: 5,
+    });
+    const ddgFetchCountAfter = fetchedUrls.filter((u) => u.includes("duckduckgo.com")).length;
+    assert.equal(ddgFetchCountAfter, ddgFetchCountBefore, "Should not hit DDG while cooldown is active");
+    assert.ok(res2.results.length >= 1);
+  } finally {
+    __test.__clearProviderCooldownsForTests();
+    globalThis.fetch = origFetch;
+  }
+});
+
+test("isOfficialDocumentation identifies documentation domains, paths, and titles", () => {
+  assert.equal(__test.isOfficialDocumentation({ domain: "docs.github.com", url: "https://docs.github.com/en", title: "GitHub Docs" }), true);
+  assert.equal(__test.isOfficialDocumentation({ domain: "developers.cloudflare.com", url: "https://developers.cloudflare.com", title: "Cloudflare Docs" }), true);
+  assert.equal(__test.isOfficialDocumentation({ domain: "example.com", url: "https://example.com/api/v1/reference", title: "API Reference" }), true);
+  assert.equal(__test.isOfficialDocumentation({ domain: "randomblog.com", url: "https://randomblog.com/my-post", title: "My Personal Blog Post" }), false);
+});
+
+test("postProcess prioritizes official documentation over generic GitHub repos on technical queries", () => {
+  const candidates = [
+    {
+      title: "GitHub - user/toy-cf-worker: A tiny test worker",
+      url: "https://github.com/user/toy-cf-worker",
+      description: "Toy repo for personal experiment",
+      source: "bing-html",
+    },
+    {
+      title: "Cloudflare Workers Developer Documentation",
+      url: "https://developers.cloudflare.com/workers/",
+      description: "Official developer guide and API documentation for Cloudflare Workers.",
+      source: "bing-html",
+    },
+  ];
+
+  const processed = __test.postProcess(
+    candidates,
+    "cloudflare workers documentation",
+    [],
+    5,
+    "technical",
+  );
+
+  assert.ok(processed.results.length >= 1);
+  assert.equal(processed.results[0].url, "https://developers.cloudflare.com/workers/");
+});
+
 

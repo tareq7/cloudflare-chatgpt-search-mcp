@@ -93,3 +93,29 @@ test("skills directory documentation does not contain broken tool names", () => 
 
   checkDir(skillDir);
 });
+
+test("search and multi_search tools accept backend brave and domains parameter without schema error", async () => {
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } });
+  try {
+    const server = createServer({});
+    const searchTool = server._registeredTools["search"];
+    const multiTool = server._registeredTools["multi_search"];
+
+    const searchRes = await searchTool.handler({
+      query: "test query",
+      backend: "brave",
+      domains: ["example.com"],
+    });
+    assert.equal(searchRes.isError, undefined);
+
+    const multiRes = await multiTool.handler({
+      queries: ["test 1", "test 2"],
+      backend: "brave",
+      domains: ["example.com"],
+    });
+    assert.equal(multiRes.isError, undefined);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
