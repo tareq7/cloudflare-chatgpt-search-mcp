@@ -67,10 +67,14 @@ export function parseBingHtml(html, limit = 10) {
     if (!url) return;
     const title = text(a);
     if (!title) return;
+    const snippet = text($(el).find(".b_caption p").first()) ||
+      text($(el).find(".b_snippet").first()) ||
+      text($(el).find(".b_lineclamp").first()) ||
+      text($(el).find("p").first());
     results.push({
       title,
       url,
-      description: text($(el).find("p").first()),
+      description: snippet,
       source: "bing-html",
     });
   });

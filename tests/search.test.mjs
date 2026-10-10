@@ -830,4 +830,48 @@ test("postProcess prioritizes official documentation over generic GitHub repos o
   assert.equal(processed.results[0].url, "https://developers.cloudflare.com/workers/");
 });
 
+test("provider health manager records successes, failures, and diagnostics", () => {
+  __test.__clearProviderCooldownsForTests();
+  const hm = __test.healthManager;
+  assert.equal(hm.isHealthy("duckduckgo"), true);
+
+  hm.recordFailure("duckduckgo", "HTTP 202 challenge", 50);
+  assert.equal(hm.isHealthy("duckduckgo"), false);
+  assert.equal(hm.isCooldown("duckduckgo"), true);
+
+  const diag = hm.getDiagnostics();
+  assert.equal(diag.duckduckgo.status, "cooling_down");
+  assert.equal(diag.duckduckgo.failures, 1);
+  assert.ok(diag.duckduckgo.last_error.includes("202"));
+
+  hm.recordSuccess("duckduckgo");
+  assert.equal(hm.isHealthy("duckduckgo"), true);
+  assert.equal(hm.isCooldown("duckduckgo"), false);
+  assert.equal(hm.getDiagnostics().duckduckgo.status, "healthy");
+  __test.__clearProviderCooldownsForTests();
+});
+
+test("searchWeb includes explicit diagnostics in errors when zero results are found", async () => {
+  __test.__clearProviderCooldownsForTests();
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<html><body>No useful results</body></html>", { status: 200 });
+
+  try {
+    const res = await searchWeb({}, {
+      query: "nonexistent query xyz987abc",
+      backend: "free",
+      mode: "web",
+      limit: 5,
+    });
+
+    assert.equal(res.results.length, 0);
+    assert.ok(res.errors.length >= 1, "Expected explicit diagnostics in errors array");
+    assert.ok(res.errors.some((e) => e.includes("Zero results returned across attempted providers")));
+    assert.ok(res.provider_health !== undefined, "Expected provider_health in response");
+  } finally {
+    globalThis.fetch = origFetch;
+    __test.__clearProviderCooldownsForTests();
+  }
+});
+
 

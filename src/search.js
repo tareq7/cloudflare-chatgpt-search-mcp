@@ -73,24 +73,98 @@ class ProviderQueue {
 const ddgQueue = new ProviderQueue({ maxConcurrent: 1, minIntervalMs: 150, jitterMs: 100 });
 const bingQueue = new ProviderQueue({ maxConcurrent: 2, minIntervalMs: 80, jitterMs: 60 });
 
-const providerCooldowns = new Map();
+class ProviderHealthManager {
+  constructor() {
+    this.records = new Map();
+  }
 
-function markProviderCooldown(provider, durationMs = 25_000) {
-  providerCooldowns.set(provider, Date.now() + durationMs);
+  _get(provider) {
+    let rec = this.records.get(provider);
+    if (!rec) {
+      rec = {
+        name: provider,
+        status: "healthy",
+        failures: 0,
+        successes: 0,
+        lastFailureTime: 0,
+        lastSuccessTime: 0,
+        lastError: null,
+        cooldownUntil: 0,
+      };
+      this.records.set(provider, rec);
+    }
+    return rec;
+  }
+
+  isCooldown(provider) {
+    const rec = this._get(provider);
+    if (rec.cooldownUntil && Date.now() < rec.cooldownUntil) {
+      return true;
+    }
+    if (rec.status === "cooling_down") {
+      rec.status = "degraded";
+      rec.cooldownUntil = 0;
+    }
+    return false;
+  }
+
+  isHealthy(provider) {
+    if (this.isCooldown(provider)) return false;
+    const rec = this._get(provider);
+    return rec.status === "healthy";
+  }
+
+  recordSuccess(provider) {
+    const rec = this._get(provider);
+    rec.status = "healthy";
+    rec.failures = 0;
+    rec.successes += 1;
+    rec.lastSuccessTime = Date.now();
+    rec.cooldownUntil = 0;
+    rec.lastError = null;
+  }
+
+  recordFailure(provider, error, cooldownMs) {
+    const rec = this._get(provider);
+    rec.failures += 1;
+    rec.lastFailureTime = Date.now();
+    rec.lastError = String(error?.message || error || "upstream failure");
+    const duration = cooldownMs !== undefined ? cooldownMs : Math.min(15_000, 4_000 + rec.failures * 3_000);
+    rec.cooldownUntil = Date.now() + duration;
+    rec.status = "cooling_down";
+  }
+
+  clear() {
+    this.records.clear();
+  }
+
+  getDiagnostics() {
+    const out = {};
+    for (const [name, rec] of this.records.entries()) {
+      out[name] = {
+        status: this.isCooldown(name) ? "cooling_down" : rec.status,
+        failures: rec.failures,
+        successes: rec.successes,
+        last_error: rec.lastError,
+        cooldown_remaining_ms: Math.max(0, rec.cooldownUntil - Date.now()),
+      };
+    }
+    return out;
+  }
+}
+
+const healthManager = new ProviderHealthManager();
+
+function markProviderCooldown(provider, durationMs) {
+  healthManager.recordFailure(provider, "cooldown active", durationMs ?? 10_000);
 }
 
 function isProviderCooldown(provider) {
-  const until = providerCooldowns.get(provider);
-  if (!until) return false;
-  if (Date.now() >= until) {
-    providerCooldowns.delete(provider);
-    return false;
-  }
-  return true;
+  return healthManager.isCooldown(provider);
 }
 
 export function __clearProviderCooldownsForTests() {
-  providerCooldowns.clear();
+  healthManager.clear();
 }
 
 function isOfficialDocumentation(result) {
@@ -619,7 +693,10 @@ async function searchDuckDuckGo(query, limit) {
         .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
         .filter((item) => item.url);
 
-      if (results.length) return results;
+      if (results.length) {
+        healthManager.recordSuccess("duckduckgo");
+        return results;
+      }
       if (/result__a|result__snippet/i.test(html)) {
         throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
       }
@@ -638,40 +715,64 @@ async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
       throw new Error("DuckDuckGo throttled (HTTP 202 cooldown active).");
     }
     let html = "";
-    try {
-      const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
-      html = await fetchText(url, { method: "GET" });
-      if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-        throw new Error("DuckDuckGo Lite challenge encountered.");
-      }
-    } catch {
-      const jitter = 80 + Math.floor(Math.random() * 120);
-      await new Promise((r) => setTimeout(r, jitter));
+    let lastError = null;
+    const maxRetries = 2;
 
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        html = await fetchText("https://lite.duckduckgo.com/lite/", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://lite.duckduckgo.com",
-            "Referer": "https://lite.duckduckgo.com/",
-          },
-          body: new URLSearchParams({ q: query }).toString(),
-        });
-        if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-          markProviderCooldown("duckduckgo", 20_000);
-          throw new Error("DuckDuckGo Lite challenge encountered (throttled).");
+        if (attempt === 0) {
+          const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
+          html = await fetchText(url, { method: "GET" });
+          if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+            throw new Error("DuckDuckGo Lite challenge encountered.");
+          }
+        } else {
+          const jitter = 80 + Math.floor(Math.random() * 120);
+          const backoff = 100 * Math.pow(2, attempt - 1) + jitter;
+          await new Promise((r) => setTimeout(r, backoff));
+
+          html = await fetchText("https://lite.duckduckgo.com/lite/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+              "Origin": "https://lite.duckduckgo.com",
+              "Referer": "https://lite.duckduckgo.com/",
+            },
+            body: new URLSearchParams({ q: query }).toString(),
+          });
+          if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+            markProviderCooldown("duckduckgo", 10_000);
+            throw new Error("DuckDuckGo Lite challenge encountered (throttled).");
+          }
         }
-      } catch (postErr) {
-        if (/202|challenge/i.test(String(postErr?.message || postErr))) {
-          markProviderCooldown("duckduckgo", 20_000);
+
+        const items = parseDuckDuckGoLite(html, limit)
+          .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+          .filter((item) => item.url);
+
+        if (items.length) {
+          healthManager.recordSuccess("duckduckgo");
+          healthManager.recordSuccess("duckduckgo-lite");
+          return items;
         }
-        throw postErr;
+
+        if (/result-link/i.test(html)) {
+          throw new Error("DuckDuckGo Lite parser found result markup but parsed zero results.");
+        }
+        return [];
+      } catch (err) {
+        lastError = err;
+        const is202 = /202|challenge/i.test(String(err?.message || err));
+        if (is202 && attempt < maxRetries) {
+          continue;
+        }
+        if (is202) {
+          markProviderCooldown("duckduckgo", 10_000);
+        }
+        throw err;
       }
     }
-    return parseDuckDuckGoLite(html, limit)
-      .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
-      .filter((item) => item.url);
+    throw lastError;
   };
 
   if (needsQueue) {
@@ -695,10 +796,11 @@ async function searchBingRss(query, limit, market) {
     q: query,
     format: "rss",
     count: String(Math.min(limit + 4, 20)),
+    setlang: "en",
   });
+  const hasNonLatin = /[\u0600-\u06FF\u4E00-\u9FFF]/.test(query);
   const cc = MARKET[market]?.cc;
-  if (cc) p.set("cc", cc);
-  p.set("setlang", "en");
+  if (cc && hasNonLatin) p.set("cc", cc);
 
   const xml = await fetchText("https://www.bing.com/search?" + p.toString());
   return parseRss(xml, "bing-rss", limit).map((result) => ({
@@ -713,18 +815,32 @@ async function searchBingHtml(query, limit, market) {
     const p = new URLSearchParams({
       q: query,
       count: String(Math.min(limit + 4, 20)),
+      setlang: "en",
     });
+    const hasNonLatin = /[\u0600-\u06FF\u4E00-\u9FFF]/.test(query);
     const cc = MARKET[market]?.cc;
-    if (cc) p.set("cc", cc);
-    p.set("setlang", "en");
+    if (cc && hasNonLatin) p.set("cc", cc);
 
     const html = await fetchText("https://www.bing.com/search?" + p.toString());
-    const results = parseBingHtml(html, limit)
+    let results = parseBingHtml(html, limit)
       .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
       .filter((item) => item.url);
 
+    if (!results.length && p.has("cc")) {
+      p.delete("cc");
+      try {
+        const retryHtml = await fetchText("https://www.bing.com/search?" + p.toString());
+        results = parseBingHtml(retryHtml, limit)
+          .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+          .filter((item) => item.url);
+      } catch {}
+    }
+
     if (!results.length && /\bb_algo\b/i.test(html)) {
       throw new Error("Bing parser found result markup but parsed zero results.");
+    }
+    if (results.length) {
+      healthManager.recordSuccess("bing-html");
     }
     return results;
   });
@@ -924,8 +1040,7 @@ export async function searchWeb(env, {
   }
 
   const ddgBlocked = () =>
-    isProviderCooldown("duckduckgo") ||
-    errors.some((e) => /202|522|challenge|duckduckgo|throttled/i.test(e));
+    isProviderCooldown("duckduckgo");
 
   if (lowQuality()) {
     const fallbackSearches = [];
@@ -1034,6 +1149,18 @@ export async function searchWeb(env, {
   const uniqueFallbacks = [...new Set(fallbacksUsed)];
   const uniqueAttempts = [...new Set(fallbacksAttempted)];
   const stillLow = lowQuality();
+
+  if (processed.results.length === 0 && errors.length === 0) {
+    const attempted = uniqueAttempts.length ? uniqueAttempts.join(", ") : "primary";
+    errors.push(`Zero results returned across attempted providers: ${attempted}`);
+    if (processed.quality.candidates > 0) {
+      errors.push(`${processed.quality.candidates} candidate(s) were retrieved but discarded below relevance threshold`);
+    }
+    if (isProviderCooldown("duckduckgo")) {
+      errors.push("DuckDuckGo provider is in cooldown (HTTP 202 challenge protection active)");
+    }
+  }
+
   const response = {
     query: q,
     search_queries: searchQueries,
@@ -1045,6 +1172,7 @@ export async function searchWeb(env, {
     fallbacks_used: uniqueFallbacks,
     fallbacks_attempted: uniqueAttempts,
     ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
+    provider_health: healthManager.getDiagnostics(),
     quality: processed.quality,
     errors,
     results: processed.results,
@@ -1341,4 +1469,5 @@ export const __test = {
   isProviderCooldown,
   markProviderCooldown,
   __clearProviderCooldownsForTests,
+  healthManager,
 };
