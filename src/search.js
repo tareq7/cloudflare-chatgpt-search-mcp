@@ -741,7 +741,7 @@ async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
             body: new URLSearchParams({ q: query }).toString(),
           });
           if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-            markProviderCooldown("duckduckgo", 10_000);
+            markProviderCooldown("duckduckgo", 3_000);
             throw new Error("DuckDuckGo Lite challenge encountered (throttled).");
           }
         }
@@ -767,7 +767,7 @@ async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
           continue;
         }
         if (is202) {
-          markProviderCooldown("duckduckgo", 10_000);
+          markProviderCooldown("duckduckgo", 3_000);
         }
         throw err;
       }
