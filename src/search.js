@@ -517,6 +517,13 @@ function postProcess(results, query, domains, limit, mode = "web") {
       .slice(0, limit);
   }
 
+  if (!relevant.length && canonical.length > 0) {
+    relevant = canonical
+      .filter((result) => result._matches >= 1 && !result._isHomepage)
+      .sort(docSort)
+      .slice(0, limit);
+  }
+
   const topScore = relevant[0]?._score || 0;
   const avgTop3 = relevant.length
     ? relevant.slice(0, 3).reduce((sum, result) => sum + result._score, 0) /
@@ -684,36 +691,40 @@ async function searchDuckDuckGo(query, limit) {
     if (isProviderCooldown("duckduckgo")) {
       throw new Error("DuckDuckGo throttled (HTTP 202 cooldown active).");
     }
-    try {
-      const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
-      const html = await fetchText(url, { method: "GET" }, { timeoutMs: 3500 });
-      if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-        throw new Error("DuckDuckGo HTML challenge encountered.");
-      }
-      const results = parseDuckDuckGoHtml(html, limit)
-        .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
-        .filter((item) => item.url);
+    const hosts = ["html.duckduckgo.com", "duckduckgo.com"];
+    for (const host of hosts) {
+      try {
+        const url = "https://" + host + "/html/?q=" + encodeURIComponent(query);
+        const html = await fetchText(url, { method: "GET" }, { timeoutMs: 5000 });
+        if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+          continue;
+        }
+        const results = parseDuckDuckGoHtml(html, limit)
+          .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+          .filter((item) => item.url);
 
-      if (results.length) {
-        healthManager.recordSuccess("duckduckgo");
-        return results;
+        if (results.length) {
+          healthManager.recordSuccess("duckduckgo");
+          return results;
+        }
+        if (/result__a|result__snippet/i.test(html)) {
+          throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
+        }
+      } catch {
+        // try next host
       }
-      if (/result__a|result__snippet/i.test(html)) {
-        throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
-      }
-    } catch {
-      // If html.duckduckgo.com encounters a challenge, 202, or fails, add jitter and try Lite
-      const jitter = 80 + Math.floor(Math.random() * 120);
-      await new Promise((r) => setTimeout(r, jitter));
     }
+    // If both html endpoints fail, try Lite with pacing jitter
+    const jitter = 80 + Math.floor(Math.random() * 120);
+    await new Promise((r) => setTimeout(r, jitter));
     return searchDuckDuckGoLite(query, limit, false);
   });
 }
 
 async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
   const execute = async () => {
-    if (isProviderCooldown("duckduckgo")) {
-      throw new Error("DuckDuckGo throttled (HTTP 202 cooldown active).");
+    if (isProviderCooldown("duckduckgo-lite")) {
+      throw new Error("DuckDuckGo Lite throttled (HTTP 202 cooldown active).");
     }
     let html = "";
     let lastError = null;
@@ -813,9 +824,9 @@ async function searchBingRss(query, limit, market) {
 
 async function searchBingHtml(query, limit, market) {
   return bingQueue.run(async () => {
-    const sanitized = query.replace(/\bno[\s-]drill\b/gi, "drill-free").replace(/^no\s+/i, "");
+    const sanitized = query.replace(/\bno[\s-]drill\b/gi, "clamp").replace(/^no\s+/i, "").replace(/\s+/g, " ").trim();
     const p = new URLSearchParams({
-      q: sanitized,
+      q: sanitized || query,
       count: String(Math.min(limit + 4, 20)),
       setlang: "en",
     });
@@ -841,6 +852,11 @@ async function searchBingHtml(query, limit, market) {
     if (!results.length && /\bb_algo\b/i.test(html)) {
       throw new Error("Bing parser found result markup but parsed zero results.");
     }
+    // Discard completely irrelevant Bing results (e.g. anti-scraping randomized pages)
+    results = results.filter((item) => {
+      const rel = relevanceDetails(item, query);
+      return rel.matches >= 1;
+    });
     if (results.length) {
       healthManager.recordSuccess("bing-html");
     }
