@@ -673,3 +673,37 @@ test("isGenericHomepage detects login and index variant pages", () => {
   assert.equal(__test.isGenericHomepage("https://example.com/products/c-clamp"), false);
 });
 
+test("searchDuckDuckGoLite falls back to POST if GET encounters 202 challenge", async () => {
+  const origFetch = globalThis.fetch;
+  const methods = [];
+  globalThis.fetch = async (url, init = {}) => {
+    methods.push(init.method || "GET");
+    if ((init.method || "GET") === "GET") {
+      return new Response("bots use DuckDuckGo too", { status: 202 });
+    }
+    return new Response(`
+      <table>
+        <tr>
+          <td>
+            <a class="result-link" href="https://developers.cloudflare.com/agents/mcp">Remote MCP Workers</a>
+          </td>
+        </tr>
+        <tr>
+          <td class="result-snippet">Cloudflare Workers MCP server with OAuth</td>
+        </tr>
+      </table>
+    `, { status: 200 });
+  };
+
+  try {
+    const results = await __test.searchDuckDuckGoLite("cloudflare mcp", 5);
+    assert.deepEqual(methods, ["GET", "POST"]);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].title, "Remote MCP Workers");
+    assert.equal(results[0].url, "https://developers.cloudflare.com/agents/mcp");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+

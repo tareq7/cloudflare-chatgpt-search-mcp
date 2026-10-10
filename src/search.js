@@ -446,16 +446,8 @@ async function fetchText(url, init = {}, limits = {}) {
       signal: controller.signal,
       headers: {
         "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,ar;q=0.5",
-        "sec-ch-ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "none",
-        "sec-fetch-user": "?1",
-        "upgrade-insecure-requests": "1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        "Accept-Language": "en-US,en;q=0.8,ar;q=0.5",
         ...(init.headers || {}),
       },
     });
@@ -499,10 +491,26 @@ async function searchDuckDuckGo(query, limit) {
 }
 
 async function searchDuckDuckGoLite(query, limit) {
-  const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
-  const html = await fetchText(url, { method: "GET" });
-  if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-    throw new Error("DuckDuckGo Lite challenge encountered.");
+  let html = "";
+  try {
+    const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
+    html = await fetchText(url, { method: "GET" });
+    if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+      throw new Error("DuckDuckGo Lite challenge encountered.");
+    }
+  } catch {
+    html = await fetchText("https://lite.duckduckgo.com/lite/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://lite.duckduckgo.com",
+        "Referer": "https://lite.duckduckgo.com/",
+      },
+      body: new URLSearchParams({ q: query }).toString(),
+    });
+    if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+      throw new Error("DuckDuckGo Lite challenge encountered.");
+    }
   }
   return parseDuckDuckGoLite(html, limit)
     .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
@@ -1107,4 +1115,5 @@ export const __test = {
   relevanceDetails,
   postProcess,
   isGenericHomepage,
+  searchDuckDuckGoLite,
 };
