@@ -2,7 +2,7 @@ import { searchSearxng } from "./providers/searxng.js";
 import { parseSearchRss } from "./parsers/rss.js";
 import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
 const PROVIDER_TIMEOUT_MS = 6000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1_500_000;
 
@@ -367,6 +367,7 @@ function postProcess(results, query, domains, limit, mode = "web") {
   const perDomainLimit = domains?.length ? Math.max(limit, 10) : 3;
   const terms = queryTerms(query);
   const termCount = terms.length;
+  const queryMentionsGithub = /\b(github|repo|repository)\b/i.test(query);
   const querySpecifiesDocs = mode === "technical" || /\b(docs?|documentation|guide|reference|api|manual|spec|rfc|sdk)\b/i.test(query);
 
   const canonical = dedupe(
@@ -383,6 +384,7 @@ function postProcess(results, query, domains, limit, mode = "web") {
     const isGitHub = result.domain === "github.com" || String(result.source || "").includes("github");
     const isClutterGitHub = isGitHub && (
       /\/login|\/signup|\/features|\/topics|\/explore|\/pricing|\/trending/i.test(result.url) ||
+      (!queryMentionsGithub && querySpecifiesDocs && relevance.matches < 2) ||
       (termCount >= 3 && relevance.matches < 2)
     );
 
@@ -391,7 +393,7 @@ function postProcess(results, query, domains, limit, mode = "web") {
     let matches = (isClutterHomepage || isClutterGitHub) ? 0 : relevance.matches;
 
     if (querySpecifiesDocs && isDoc && matches >= 1) {
-      score = Math.min(1, score * 1.35 + 0.15);
+      score = Math.min(1, score * 1.5 + 0.2);
     }
 
     return {
@@ -405,8 +407,15 @@ function postProcess(results, query, domains, limit, mode = "web") {
   });
 
   const docSort = (a, b) => {
-    if (querySpecifiesDocs && a._isDoc !== b._isDoc && Math.abs(b._score - a._score) < 0.25) {
-      return b._isDoc ? 1 : -1;
+    if (querySpecifiesDocs) {
+      if (a._isDoc && !b._isDoc) {
+        if (!queryMentionsGithub && b._isGitHub) return -1;
+        if (b._score - a._score < 0.35) return -1;
+      }
+      if (!a._isDoc && b._isDoc) {
+        if (!queryMentionsGithub && a._isGitHub) return 1;
+        if (a._score - b._score < 0.35) return 1;
+      }
     }
     return b._score - a._score;
   };
@@ -479,19 +488,21 @@ function buildQuery(query, mode, market, domains = []) {
       ? ["manufacturer", "supplier"]
       : ["supplier", "wholesale"];
     const needed = words.filter((w) => !lower.includes(w));
-    if (needed.length) q += " " + needed.slice(0, 2).join(" ");
+    if (needed.length && queryTerms(query).length < 5) {
+      q += " " + needed.slice(0, 1).join(" ");
+    }
   } else if (mode === "commerce") {
     const lower = q.toLowerCase();
     const words = ["price", "store"];
     const needed = words.filter((w) => !lower.includes(w));
-    if (needed.length) q += " " + needed.slice(0, 2).join(" ");
+    if (needed.length && queryTerms(query).length < 5) {
+      q += " " + needed.slice(0, 1).join(" ");
+    }
   } else if (mode === "technical") {
     const lower = q.toLowerCase();
-    const techWords = [];
-    if (!lower.includes("doc")) techWords.push("documentation");
-    if (!lower.includes("github") && !lower.includes("repo")) techWords.push("GitHub");
-    if (!lower.includes("release") && !lower.includes("changelog")) techWords.push("release");
-    if (techWords.length) q += " " + techWords.join(" ");
+    if (!lower.includes("doc") && !lower.includes("guide") && !lower.includes("api") && !lower.includes("manual") && queryTerms(query).length < 5) {
+      q += " documentation";
+    }
   }
 
   return (q + domainClause(domains)).slice(0, 1000);
@@ -556,17 +567,28 @@ async function fetchText(url, init = {}, limits = {}) {
       signal: controller.signal,
       headers: {
         "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
-        "Accept-Language": "en-US,en;q=0.8,ar;q=0.5",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
         ...(init.headers || {}),
       },
     });
-    if (!res.ok || res.status === 202) {
+    if (!res.ok && res.status !== 202) {
       throw new Error(
         "HTTP " + res.status + " from " + new URL(url).hostname,
       );
     }
-    return await readTextLimited(res, maxBytes);
+    const text = await readTextLimited(res, maxBytes);
+    if (res.status === 202) {
+      if (
+        /bots use DuckDuckGo too|challenge to confirm this search/i.test(text) ||
+        !/result__a|result-link/i.test(text)
+      ) {
+        throw new Error(
+          "HTTP " + res.status + " from " + new URL(url).hostname,
+        );
+      }
+    }
+    return text;
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(
@@ -589,7 +611,7 @@ async function searchDuckDuckGo(query, limit) {
     }
     try {
       const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
-      const html = await fetchText(url, { method: "GET" });
+      const html = await fetchText(url, { method: "GET" }, { timeoutMs: 3500 });
       if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
         throw new Error("DuckDuckGo HTML challenge encountered.");
       }
@@ -603,7 +625,7 @@ async function searchDuckDuckGo(query, limit) {
       }
     } catch {
       // If html.duckduckgo.com encounters a challenge, 202, or fails, add jitter and try Lite
-      const jitter = 100 + Math.floor(Math.random() * 150);
+      const jitter = 80 + Math.floor(Math.random() * 120);
       await new Promise((r) => setTimeout(r, jitter));
     }
     return searchDuckDuckGoLite(query, limit, false);
@@ -623,7 +645,7 @@ async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
         throw new Error("DuckDuckGo Lite challenge encountered.");
       }
     } catch {
-      const jitter = 100 + Math.floor(Math.random() * 150);
+      const jitter = 80 + Math.floor(Math.random() * 120);
       await new Promise((r) => setTimeout(r, jitter));
 
       try {
@@ -637,12 +659,12 @@ async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
           body: new URLSearchParams({ q: query }).toString(),
         });
         if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-          markProviderCooldown("duckduckgo", 25_000);
+          markProviderCooldown("duckduckgo", 20_000);
           throw new Error("DuckDuckGo Lite challenge encountered (throttled).");
         }
       } catch (postErr) {
         if (/202|challenge/i.test(String(postErr?.message || postErr))) {
-          markProviderCooldown("duckduckgo", 25_000);
+          markProviderCooldown("duckduckgo", 20_000);
         }
         throw postErr;
       }
@@ -968,7 +990,7 @@ export async function searchWeb(env, {
   if (lowQuality() && cleanQuery !== q && cleanQuery !== marketQuery) {
     fallbacksAttempted.push("clean-query");
     const cleanSearches = [searchBingHtml(cleanQuery, cap, market)];
-    if (!ddgBlocked()) {
+    if (!isProviderCooldown("duckduckgo")) {
       cleanSearches.push(searchDuckDuckGo(cleanQuery, cap));
     }
     const cleanResults = await collectSearches(
@@ -978,7 +1000,12 @@ export async function searchWeb(env, {
     );
     searchQueries.push(cleanQuery);
     if (cleanResults.length) {
-      rawResults.push(...cleanResults);
+      rawResults.push(
+        ...cleanResults.map((result) => ({
+          ...result,
+          _relevanceQuery: cleanQuery,
+        })),
+      );
       fallbacksUsed.push("clean-query");
       processed = postProcess(rawResults, query, domains, n, mode);
     }
