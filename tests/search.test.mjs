@@ -658,3 +658,18 @@ test("multiSearch provides consistent top-level quality, backend, and error tele
   assert.ok(res.results.length >= 1);
 });
 
+test("provider fetch rejects HTTP 202 bot challenge responses", async () => {
+  globalThis.fetch = async () => new Response("challenge", { status: 202 });
+  await assert.rejects(
+    () => __test.fetchText("https://html.duckduckgo.com/html/?q=test"),
+    /HTTP 202/,
+  );
+});
+
+test("isGenericHomepage detects login and index variant pages", () => {
+  assert.equal(__test.isGenericHomepage("https://example.com/signin"), true);
+  assert.equal(__test.isGenericHomepage("https://example.com/auth/login"), true);
+  assert.equal(__test.isGenericHomepage("https://example.com/index.php"), true);
+  assert.equal(__test.isGenericHomepage("https://example.com/products/c-clamp"), false);
+});
+

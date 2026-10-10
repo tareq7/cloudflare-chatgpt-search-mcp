@@ -159,7 +159,7 @@ function isGenericHomepage(url) {
   try {
     const u = new URL(url);
     const path = u.pathname.replace(/\/+$/, "").toLowerCase();
-    return !path || path === "/index.html" || path === "/home" || path === "/en" || path === "/login" || path === "/default.aspx";
+    return !path || path === "/index.html" || path === "/index.htm" || path === "/index.php" || path === "/home" || path === "/en" || path === "/login" || path === "/signin" || path === "/auth/login" || path === "/default.aspx";
   } catch {
     return false;
   }
@@ -376,7 +376,12 @@ function buildQuery(query, mode, market, domains = []) {
   } else if (mode === "commerce") {
     q += " product price retailer marketplace distributor";
   } else if (mode === "technical") {
-    q += " documentation GitHub release changelog";
+    const lower = q.toLowerCase();
+    const techWords = [];
+    if (!lower.includes("doc")) techWords.push("documentation");
+    if (!lower.includes("github") && !lower.includes("repo")) techWords.push("GitHub");
+    if (!lower.includes("release") && !lower.includes("changelog")) techWords.push("release");
+    if (techWords.length) q += " " + techWords.join(" ");
   }
 
   return (q + domainClause(domains)).slice(0, 1000);
@@ -441,12 +446,20 @@ async function fetchText(url, init = {}, limits = {}) {
       signal: controller.signal,
       headers: {
         "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
-        "Accept-Language": "en-US,en;q=0.8,ar;q=0.5",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.5",
+        "sec-ch-ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
         ...(init.headers || {}),
       },
     });
-    if (!res.ok) {
+    if (!res.ok || res.status === 202) {
       throw new Error(
         "HTTP " + res.status + " from " + new URL(url).hostname,
       );
@@ -465,21 +478,32 @@ async function fetchText(url, init = {}, limits = {}) {
 }
 
 async function searchDuckDuckGo(query, limit) {
-  const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
-  const html = await fetchText(url, { method: "GET" });
-  const results = parseDuckDuckGoHtml(html, limit)
-    .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
-    .filter((item) => item.url);
+  try {
+    const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+    const html = await fetchText(url, { method: "GET" });
+    if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+      throw new Error("DuckDuckGo HTML challenge encountered.");
+    }
+    const results = parseDuckDuckGoHtml(html, limit)
+      .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+      .filter((item) => item.url);
 
-  if (!results.length && /result__a|result__snippet/i.test(html)) {
-    throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
+    if (results.length) return results;
+    if (/result__a|result__snippet/i.test(html)) {
+      throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
+    }
+  } catch {
+    // If html.duckduckgo.com encounters a challenge, 202, or fails, immediately try Lite
   }
-  return results;
+  return searchDuckDuckGoLite(query, limit);
 }
 
 async function searchDuckDuckGoLite(query, limit) {
   const url = "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query);
   const html = await fetchText(url, { method: "GET" });
+  if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
+    throw new Error("DuckDuckGo Lite challenge encountered.");
+  }
   return parseDuckDuckGoLite(html, limit)
     .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
     .filter((item) => item.url);
@@ -1082,4 +1106,5 @@ export const __test = {
   matchesDomains,
   relevanceDetails,
   postProcess,
+  isGenericHomepage,
 };
