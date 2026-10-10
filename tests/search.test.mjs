@@ -874,4 +874,66 @@ test("searchWeb includes explicit diagnostics in errors when zero results are fo
   }
 });
 
+test("Cheerio parses Brave HTML with titles, descriptions, and direct URLs", () => {
+  const html = `
+    <div class="snippet">
+      <a href="https://developers.cloudflare.com/workers/"><span class="title">Cloudflare Workers Docs</span></a>
+      <p class="snippet-description">Build serverless apps on Cloudflare.</p>
+    </div>
+    <div data-type="web">
+      <a href="https://github.com/cloudflare/workers-sdk"><h2 class="search-snippet-title">Wrangler CLI</h2></a>
+      <div class="generic-snippet">Home to Wrangler, the CLI for Cloudflare Workers.</div>
+    </div>
+  `;
+  const results = __test.parseBraveHtml(html, 10);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].title, "Cloudflare Workers Docs");
+  assert.equal(results[0].url, "https://developers.cloudflare.com/workers/");
+  assert.equal(results[0].description, "Build serverless apps on Cloudflare.");
+  assert.equal(results[0].source, "brave");
+  assert.equal(results[1].title, "Wrangler CLI");
+  assert.equal(results[1].url, "https://github.com/cloudflare/workers-sdk");
+});
+
+test("searchWeb executes Brave when backend is brave and reports backend brave", async () => {
+  __test.__clearProviderCooldownsForTests();
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("search.brave.com")) {
+      return new Response(`
+        <div class="snippet">
+          <a href="https://developers.cloudflare.com/workers/"><span class="title">Cloudflare Workers</span></a>
+          <p class="snippet-description">Official developer documentation.</p>
+        </div>
+        <div class="snippet">
+          <a href="https://developers.cloudflare.com/workers/get-started/"><span class="title">Get Started with Cloudflare Workers</span></a>
+          <p class="snippet-description">Getting started guide for Cloudflare Workers.</p>
+        </div>
+        <div class="snippet">
+          <a href="https://developers.cloudflare.com/workers/reference/"><span class="title">Cloudflare Workers API Reference</span></a>
+          <p class="snippet-description">Reference documentation and runtime APIs.</p>
+        </div>
+      `, { status: 200, headers: { "content-type": "text/html" } });
+    }
+    return new Response("", { status: 404 });
+  };
+
+  try {
+    const res = await searchWeb({}, {
+      query: "cloudflare workers documentation",
+      backend: "brave",
+      mode: "technical",
+      limit: 3,
+    });
+    assert.equal(res.backend, "brave");
+    assert.ok(res.results.length >= 3);
+    assert.equal(res.results[0].url, "https://developers.cloudflare.com/workers/");
+  } finally {
+    globalThis.fetch = origFetch;
+    __test.__clearProviderCooldownsForTests();
+  }
+});
+
+
 

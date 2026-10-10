@@ -80,3 +80,29 @@ export function parseBingHtml(html, limit = 10) {
   });
   return results;
 }
+
+export function parseBraveHtml(html, limit = 10) {
+  const $ = load(html);
+  const results = [];
+  const seenUrls = new Set();
+  $(".snippet, div[data-type='web']").each((_, el) => {
+    if (results.length >= limit) return false;
+    const a = $(el).find("a").first();
+    const url = a.attr("href") || $(el).find("a[href^='http']").attr("href");
+    if (!url || !/^https?:\/\//i.test(url)) return;
+    if (url.includes("search.brave.com") || url.includes("brave.com/search")) return;
+    const title = text($(el).find(".title, .search-snippet-title, h2, h3").first()) || text(a);
+    if (!title) return;
+    if (seenUrls.has(url.toLowerCase())) return;
+    seenUrls.add(url.toLowerCase());
+    const snippet = text($(el).find(".snippet-description, .generic-snippet, .snippet-content, p").first());
+    results.push({
+      title,
+      url,
+      description: snippet || undefined,
+      source: "brave",
+    });
+  });
+  return results;
+}
+

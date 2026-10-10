@@ -1,6 +1,6 @@
 import { searchSearxng } from "./providers/searxng.js";
 import { parseSearchRss } from "./parsers/rss.js";
-import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
+import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml, parseBraveHtml } from "./parsers/search-html.js";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
 const PROVIDER_TIMEOUT_MS = 6000;
@@ -72,6 +72,7 @@ class ProviderQueue {
 
 const ddgQueue = new ProviderQueue({ maxConcurrent: 1, minIntervalMs: 150, jitterMs: 100 });
 const bingQueue = new ProviderQueue({ maxConcurrent: 2, minIntervalMs: 80, jitterMs: 60 });
+const braveQueue = new ProviderQueue({ maxConcurrent: 1, minIntervalMs: 250, jitterMs: 100 });
 
 class ProviderHealthManager {
   constructor() {
@@ -812,8 +813,9 @@ async function searchBingRss(query, limit, market) {
 
 async function searchBingHtml(query, limit, market) {
   return bingQueue.run(async () => {
+    const sanitized = query.replace(/\bno[\s-]drill\b/gi, "drill-free").replace(/^no\s+/i, "");
     const p = new URLSearchParams({
-      q: query,
+      q: sanitized,
       count: String(Math.min(limit + 4, 20)),
       setlang: "en",
     });
@@ -841,6 +843,58 @@ async function searchBingHtml(query, limit, market) {
     }
     if (results.length) {
       healthManager.recordSuccess("bing-html");
+    }
+    return results;
+  });
+}
+
+async function searchBraveHtml(query, limit) {
+  if (isProviderCooldown("brave")) {
+    throw new Error("Brave Search throttled (cooldown active).");
+  }
+  return braveQueue.run(async () => {
+    if (isProviderCooldown("brave")) {
+      throw new Error("Brave Search throttled (cooldown active).");
+    }
+    const url = "https://search.brave.com/search?q=" + encodeURIComponent(query) + "&source=web";
+    const maxRetries = 1;
+    let html = "";
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          const backoff = 120 + Math.floor(Math.random() * 80);
+          await new Promise((r) => setTimeout(r, backoff));
+        }
+        html = await fetchText(url, {
+          headers: {
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+        }, { timeoutMs: 4000 });
+        break;
+      } catch (err) {
+        const isThrottled = /429|captcha|challenge|flagged/i.test(String(err?.message || err));
+        if (isThrottled) {
+          markProviderCooldown("brave", 10_000);
+          throw err;
+        }
+        if (attempt >= maxRetries) throw err;
+      }
+    }
+
+    if (/captcha|flagged as being suspicious|This page needs JavaScript to function/i.test(html) && !/snippet|result/i.test(html)) {
+      markProviderCooldown("brave", 10_000);
+      throw new Error("Brave Search challenge encountered.");
+    }
+
+    const results = parseBraveHtml(html, limit)
+      .map((item) => ({ ...item, url: normalizeUrl(item.url) }))
+      .filter((item) => item.url);
+
+    if (results.length) {
+      healthManager.recordSuccess("brave");
     }
     return results;
   });
@@ -949,9 +1003,6 @@ export async function searchWeb(env, {
   domains = [],
   backend = "auto",
 }) {
-  if (backend === "brave") {
-    backend = "auto";
-  }
   const n = Math.max(1, Math.min(Number(limit) || 10, 20));
   const cap = Math.min(n * 2, 20);
   const q = buildQuery(query, mode, market, domains);
@@ -1002,15 +1053,17 @@ export async function searchWeb(env, {
   const searchQueries = [q];
   const hasSearxng = searxngEnabled;
   const ddgAvailable = !isProviderCooldown("duckduckgo");
-  const primarySearches = hasSearxng
-    ? [searchSearxng(env, {
-        query: q, market, mode, limit: cap,
-        isUseful: searxngUseful, diagnostics: searxngDiagnostics,
-      })]
-    : (ddgAvailable
-      ? [searchDuckDuckGo(q, cap)]
-      : [searchBingHtml(q, cap, market)]);
-  if (!hasSearxng && ddgAvailable && env.ENABLE_BING_RSS === "1") {
+  const primarySearches = backend === "brave"
+    ? [searchBraveHtml(q, cap)]
+    : (hasSearxng
+      ? [searchSearxng(env, {
+          query: q, market, mode, limit: cap,
+          isUseful: searxngUseful, diagnostics: searxngDiagnostics,
+        })]
+      : (ddgAvailable
+        ? [searchDuckDuckGo(q, cap)]
+        : [searchBraveHtml(q, cap), searchBingHtml(q, cap, market)]));
+  if (!hasSearxng && ddgAvailable && env.ENABLE_BING_RSS === "1" && backend !== "brave") {
     primarySearches.push(searchBingRss(q, cap, market));
   }
   let rawResults = await collectSearches(
@@ -1044,9 +1097,13 @@ export async function searchWeb(env, {
 
   if (lowQuality()) {
     const fallbackSearches = [];
-    if (!ddgBlocked()) {
+    if (!ddgBlocked() && backend !== "brave") {
       fallbacksAttempted.push("duckduckgo-lite");
       fallbackSearches.push(searchDuckDuckGoLite(q, cap));
+    }
+    if (ddgBlocked() && !isProviderCooldown("brave") && backend !== "brave") {
+      fallbacksAttempted.push("brave");
+      fallbackSearches.push(searchBraveHtml(q, cap));
     }
     fallbacksAttempted.push("bing-html");
     fallbackSearches.push(searchBingHtml(q, cap, market));
@@ -1064,6 +1121,9 @@ export async function searchWeb(env, {
       if (fallbackSources.has("duckduckgo-lite")) {
         fallbacksUsed.push("duckduckgo-lite");
       }
+      if (fallbackSources.has("brave")) {
+        fallbacksUsed.push("brave");
+      }
       if (fallbackSources.has("bing-html")) {
         fallbacksUsed.push("bing-html");
       }
@@ -1077,6 +1137,9 @@ export async function searchWeb(env, {
     const marketSearches = [];
     if (!ddgBlocked()) {
       marketSearches.push(searchDuckDuckGo(marketQuery, cap));
+    }
+    if (ddgBlocked() && !isProviderCooldown("brave")) {
+      marketSearches.push(searchBraveHtml(marketQuery, cap));
     }
     marketSearches.push(searchBingHtml(marketQuery, cap, market));
     if (env.ENABLE_BING_RSS === "1") {
@@ -1107,6 +1170,9 @@ export async function searchWeb(env, {
     const cleanSearches = [searchBingHtml(cleanQuery, cap, market)];
     if (!isProviderCooldown("duckduckgo")) {
       cleanSearches.push(searchDuckDuckGo(cleanQuery, cap));
+    }
+    if (ddgBlocked() && !isProviderCooldown("brave")) {
+      cleanSearches.push(searchBraveHtml(cleanQuery, cap));
     }
     const cleanResults = await collectSearches(
       cleanSearches,
@@ -1150,25 +1216,33 @@ export async function searchWeb(env, {
   const uniqueAttempts = [...new Set(fallbacksAttempted)];
   const stillLow = lowQuality();
 
-  if (processed.results.length === 0 && errors.length === 0) {
+  if (processed.results.length === 0) {
     const attempted = uniqueAttempts.length ? uniqueAttempts.join(", ") : "primary";
-    errors.push(`Zero results returned across attempted providers: ${attempted}`);
-    if (processed.quality.candidates > 0) {
+    const hasZeroDiagnostic = errors.some((e) => e.includes("Zero results returned across attempted providers"));
+    if (!hasZeroDiagnostic) {
+      errors.push(`Zero results returned across attempted providers: ${attempted}`);
+    }
+    if (processed.quality.candidates > 0 && !errors.some((e) => e.includes("discarded below relevance threshold"))) {
       errors.push(`${processed.quality.candidates} candidate(s) were retrieved but discarded below relevance threshold`);
     }
-    if (isProviderCooldown("duckduckgo")) {
+    if (isProviderCooldown("duckduckgo") && !errors.some((e) => e.includes("DuckDuckGo provider is in cooldown"))) {
       errors.push("DuckDuckGo provider is in cooldown (HTTP 202 challenge protection active)");
+    }
+    if (isProviderCooldown("brave") && !errors.some((e) => e.includes("Brave provider is in cooldown"))) {
+      errors.push("Brave provider is in cooldown (rate limit / challenge protection active)");
     }
   }
 
   const response = {
     query: q,
     search_queries: searchQueries,
-    backend: backend === "auto" && uniqueAttempts.length
-      ? "auto:free-fallbacks"
-      : backend === "auto"
-        ? hasSearxng ? "auto:searxng" : "auto:free"
-        : hasSearxng ? "free:searxng" : "free",
+    backend: backend === "brave"
+      ? (uniqueAttempts.length ? "brave:fallbacks" : "brave")
+      : backend === "auto" && uniqueAttempts.length
+        ? "auto:free-fallbacks"
+        : backend === "auto"
+          ? hasSearxng ? "auto:searxng" : "auto:free"
+          : hasSearxng ? "free:searxng" : "free",
     fallbacks_used: uniqueFallbacks,
     fallbacks_attempted: uniqueAttempts,
     ...(hasSearxng ? { searxng_chain: searxngDiagnostics } : {}),
@@ -1463,11 +1537,15 @@ export const __test = {
   isGenericHomepage,
   isOfficialDocumentation,
   searchDuckDuckGoLite,
+  searchBraveHtml,
+  parseBraveHtml,
   ProviderQueue,
   ddgQueue,
   bingQueue,
+  braveQueue,
   isProviderCooldown,
   markProviderCooldown,
   __clearProviderCooldownsForTests,
   healthManager,
 };
+
