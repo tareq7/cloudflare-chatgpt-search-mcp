@@ -585,3 +585,76 @@ test("multiSearch handles empty queries array gracefully", async () => {
   assert.deepEqual(res.per_query, []);
 });
 
+test("relevance gate rejects generic homepages matching only one query term on multi-term queries", () => {
+  const query = "Cloudflare remote MCP Workers OAuth";
+  const processed = __test.postProcess([
+    {
+      title: "Cloudflare: Build for the agent era",
+      url: "https://www.cloudflare.com/",
+      description: "Join thousands of developers who have deployed globally with Cloudflare.",
+    },
+    {
+      title: "Cloudflare Dashboard | Manage Your Account",
+      url: "https://dash.cloudflare.com/login",
+      description: "Log in to the Cloudflare dashboard to manage your account.",
+    },
+    {
+      title: "Cloudflare Workers Remote MCP Server with OAuth",
+      url: "https://blog.cloudflare.com/remote-mcp-oauth/",
+      description: "Step-by-step documentation on building a remote Model Context Protocol server on Workers with OAuth authentication.",
+    },
+  ], query, [], 5);
+
+  assert.equal(processed.results.length, 1);
+  assert.equal(processed.results[0].url, "https://blog.cloudflare.com/remote-mcp-oauth/");
+  assert.ok(processed.quality.discarded_low_relevance >= 2);
+});
+
+test("relevance gate rejects zero-match candidates and never retains completely unrelated domains like ilovepdf", () => {
+  const query = "no drill C clamp TV anti tip safety straps";
+  const processed = __test.postProcess([
+    {
+      title: "iLovePDF | Online PDF tools for PDF lovers",
+      url: "https://www.ilovepdf.com/",
+      description: "iLovePDF is an online service to work with PDF files completely free and easy to use. Merge, split, compress.",
+    },
+    {
+      title: "Used Cars for Sale in Saudi Arabia",
+      url: "https://cars.example.com/used-cars",
+      description: "Find the best deals on pre-owned sedans and SUVs.",
+    },
+  ], query, [], 5);
+
+  assert.equal(processed.results.length, 0);
+  assert.equal(processed.quality.kept, 0);
+  assert.equal(processed.quality.top_score, 0);
+  assert.equal(processed.quality.discarded_low_relevance, 2);
+});
+
+test("multiSearch provides consistent top-level quality, backend, and error telemetry", async () => {
+  globalThis.fetch = async (input) => {
+    const u = new URL(String(input));
+    const query = u.searchParams.get("q") || "";
+    if (query.includes("straps")) {
+      return ok(ddgResult("Anti-Tip TV Straps Heavy Duty", "https://amazon.sa/dp/B001", "C clamp TV straps safety"));
+    }
+    return ok("");
+  };
+
+  const res = await multiSearch({}, {
+    queries: ["TV straps"],
+    mode: "web",
+    market: "SA",
+    limit_per_query: 3,
+    backend: "auto",
+  });
+
+  assert.equal(res.queries.length, 1);
+  assert.ok(typeof res.backend === "string");
+  assert.ok(res.quality && typeof res.quality.top_score === "number");
+  assert.ok(Array.isArray(res.errors));
+  assert.ok(Array.isArray(res.fallbacks_attempted));
+  assert.ok(Array.isArray(res.fallbacks_used));
+  assert.ok(res.results.length >= 1);
+});
+

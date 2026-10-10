@@ -3,7 +3,7 @@ import { parseSearchRss } from "./parsers/rss.js";
 import { parseDuckDuckGoHtml, parseDuckDuckGoLite, parseBingHtml } from "./parsers/search-html.js";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
-const PROVIDER_TIMEOUT_MS = 5000;
+const PROVIDER_TIMEOUT_MS = 6000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1_500_000;
 
 const MARKET = {
@@ -155,6 +155,16 @@ function hostOf(url) {
   }
 }
 
+function isGenericHomepage(url) {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.replace(/\/+$/, "").toLowerCase();
+    return !path || path === "/index.html" || path === "/home" || path === "/en" || path === "/login" || path === "/default.aspx";
+  } catch {
+    return false;
+  }
+}
+
 function normalizeDomain(value) {
   try {
     const text = String(value || "").trim().toLowerCase();
@@ -278,6 +288,9 @@ function dedupe(results, limit, perDomainLimit = 3, domains = []) {
 
 function postProcess(results, query, domains, limit) {
   const perDomainLimit = domains?.length ? Math.max(limit, 10) : 3;
+  const terms = queryTerms(query);
+  const termCount = terms.length;
+
   const canonical = dedupe(
     results,
     Math.max(limit * 6, 30),
@@ -286,16 +299,18 @@ function postProcess(results, query, domains, limit) {
   ).map((result) => {
     const relevanceQuery = result._relevanceQuery || query;
     const relevance = relevanceDetails(result, relevanceQuery);
+    const isHomepage = isGenericHomepage(result.url);
+    const isClutterHomepage = isHomepage && termCount >= 2 && relevance.matches < 2;
     return {
       ...result,
-      _score: relevance.score,
-      _matches: relevance.matches,
+      _score: isClutterHomepage ? 0 : relevance.score,
+      _matches: isClutterHomepage ? 0 : relevance.matches,
+      _isHomepage: isHomepage,
     };
   });
 
-  const terms = queryTerms(query);
-  const threshold = terms.length <= 1 ? 0.2 : terms.length <= 3 ? 0.18 : 0.14;
-  const minimumMatches = terms.length >= 4 ? 2 : terms.length ? 1 : 0;
+  const threshold = termCount <= 1 ? 0.2 : termCount <= 3 ? 0.18 : 0.14;
+  const minimumMatches = termCount >= 4 ? 2 : termCount ? 1 : 0;
   let relevant = canonical
     .filter((result) =>
       result._score >= threshold && result._matches >= minimumMatches
@@ -304,17 +319,19 @@ function postProcess(results, query, domains, limit) {
     .slice(0, limit);
 
   if (!relevant.length && canonical.length > 0) {
+    const fallbackThreshold = termCount <= 1 ? 0.15 : termCount <= 3 ? 0.12 : 0.10;
+    const fallbackMinMatches = termCount >= 4 ? 2 : termCount ? 1 : 0;
     relevant = canonical
-      .filter((result) => result._matches >= 1)
+      .filter((result) =>
+        result._score >= fallbackThreshold &&
+        result._matches >= fallbackMinMatches &&
+        !result._isHomepage
+      )
       .sort((a, b) => b._score - a._score)
       .slice(0, limit);
   }
 
-  if (!relevant.length && canonical.length > 0) {
-    relevant = canonical.slice(0, limit);
-  }
-
-  const topScore = relevant[0]?._score || canonical[0]?._score || 0;
+  const topScore = relevant[0]?._score || 0;
   const avgTop3 = relevant.length
     ? relevant.slice(0, 3).reduce((sum, result) => sum + result._score, 0) /
       Math.min(3, relevant.length)
@@ -324,6 +341,7 @@ function postProcess(results, query, domains, limit) {
     results: relevant.map(({
       _score,
       _matches,
+      _isHomepage,
       _relevanceQuery,
       ...result
     }) => result),
@@ -804,12 +822,25 @@ export async function multiSearch(env, {
   mode = "web",
   market = "global",
   limit_per_query = 6,
+  domains = [],
+  backend = "auto",
 }) {
   const list = [...new Set((queries || []).filter(Boolean).map((q) => String(q).trim()))]
     .filter(Boolean)
     .slice(0, 6);
   if (!list.length) {
-    return { queries: [], mode, market, results: [], per_query: [] };
+    return {
+      queries: [],
+      mode,
+      market,
+      backend,
+      quality: { top_score: 0, average_top3: 0, kept: 0, candidates: 0, discarded_low_relevance: 0 },
+      fallbacks_used: [],
+      fallbacks_attempted: [],
+      errors: [],
+      results: [],
+      per_query: [],
+    };
   }
   const perQueryLimit = Math.max(1, Math.min(Number(limit_per_query) || 6, 10));
 
@@ -820,7 +851,8 @@ export async function multiSearch(env, {
         mode,
         market,
         limit: perQueryLimit,
-        backend: "auto",
+        domains,
+        backend,
       });
     } catch (error) {
       return {
@@ -848,11 +880,38 @@ export async function multiSearch(env, {
         }
   );
 
+  const perDomainLimit = domains?.length ? Math.max(perQueryLimit, 10) : 3;
   const combined = dedupe(
     responses.flatMap((response) => response.results || []),
     Math.min(30, list.length * perQueryLimit),
+    perDomainLimit,
+    domains,
   );
-  return { queries: list, mode, market, results: combined, per_query: responses };
+
+  const topScores = responses.map((r) => r.quality?.top_score || 0).filter(Boolean);
+  const avgScores = responses.map((r) => r.quality?.average_top3 || 0).filter(Boolean);
+  const activeBackend = responses.map((r) => r.backend).find((b) => b && b !== "error") || backend;
+
+  return {
+    queries: list,
+    mode,
+    market,
+    backend: activeBackend,
+    quality: {
+      top_score: topScores.length ? Number(Math.max(...topScores).toFixed(3)) : 0,
+      average_top3: avgScores.length
+        ? Number((avgScores.reduce((a, b) => a + b, 0) / avgScores.length).toFixed(3))
+        : 0,
+      kept: combined.length,
+      candidates: responses.reduce((acc, r) => acc + (r.quality?.candidates || 0), 0),
+      discarded_low_relevance: responses.reduce((acc, r) => acc + (r.quality?.discarded_low_relevance || 0), 0),
+    },
+    fallbacks_used: [...new Set(responses.flatMap((r) => r.fallbacks_used || []))],
+    fallbacks_attempted: [...new Set(responses.flatMap((r) => r.fallbacks_attempted || []))],
+    errors: [...new Set(responses.flatMap((r) => r.errors || []))],
+    results: combined,
+    per_query: responses,
+  };
 }
 
 function isForbiddenHost(hostname) {

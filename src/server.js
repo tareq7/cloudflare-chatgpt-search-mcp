@@ -69,6 +69,8 @@ export function createServer(env = (typeof process !== "undefined" ? process.env
         mode: z.enum(["web", "news", "supplier", "commerce", "technical"]).optional().default("web"),
         market: z.enum(["global", "SA", "AE", "CN"]).optional().default("global"),
         limit_per_query: z.number().int().min(1).max(10).optional().default(6),
+        domains: z.array(z.string().min(1).max(253)).max(5).optional().default([]),
+        backend: z.enum(["free", "auto", "searxng"]).optional().default("auto"),
       },
       annotations: {
         readOnlyHint: true,

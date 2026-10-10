@@ -18,6 +18,7 @@ const LANGUAGES = { SA: "ar-SA", AE: "ar-AE", CN: "zh-CN", global: "en-US" };
 const cooldowns = new Map();
 const COOLDOWN_MS = 5 * 60_000;
 const DENIAL_COOLDOWN_MS = 30 * 60_000;
+const DEGRADED_SEARXNG_HOSTS = new Set(["sx.xo.st"]);
 
 function validateEndpoint(raw) {
   let url;
@@ -27,6 +28,9 @@ function validateEndpoint(raw) {
     throw new Error("SEARXNG endpoint must be a valid public HTTPS URL.");
   }
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (DEGRADED_SEARXNG_HOSTS.has(hostname)) {
+    throw new Error(`SearXNG host ${hostname} is disabled due to degraded API search availability.`);
+  }
   const ip = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   const badIp = ip && (
     ip.some((n) => Number(n) > 255) ||

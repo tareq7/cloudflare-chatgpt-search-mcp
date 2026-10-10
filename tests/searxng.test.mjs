@@ -416,3 +416,10 @@ test("SearXNG requests send User-Agent header", async () => {
   await searchSearxng({ SEARXNG_URL: "https://priv.au" }, { query: "ua test" });
   assert.equal(headersSent["User-Agent"], "CloudflareSearchMCP/1.0");
 });
+
+test("SearXNG endpoint validator rejects degraded host sx.xo.st fast", () => {
+  assert.throws(
+    () => configuredSearxngEndpoints({ SEARXNG_URL: "https://sx.xo.st" }),
+    /SearXNG host sx\.xo\.st is disabled due to degraded API search availability/,
+  );
+});
