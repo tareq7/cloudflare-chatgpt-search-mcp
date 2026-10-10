@@ -192,7 +192,7 @@ function matchesDomains(result, domains = []) {
 
 const STOPWORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
-  "in", "is", "it", "of", "on", "or", "the", "to", "with",
+  "in", "is", "it", "no", "not", "of", "on", "or", "the", "to", "with",
 ]);
 
 function queryTerms(query) {
@@ -370,11 +370,17 @@ function buildQuery(query, mode, market, domains = []) {
   if (place && !q.toLowerCase().includes(place.toLowerCase())) q += " " + place;
 
   if (mode === "supplier") {
-    q += market === "CN"
-      ? " manufacturer factory OEM ODM wholesale supplier"
-      : " supplier distributor wholesale warehouse local stock";
+    const lower = q.toLowerCase();
+    const words = market === "CN"
+      ? ["manufacturer", "supplier"]
+      : ["supplier", "wholesale"];
+    const needed = words.filter((w) => !lower.includes(w));
+    if (needed.length) q += " " + needed.slice(0, 2).join(" ");
   } else if (mode === "commerce") {
-    q += " product price retailer marketplace distributor";
+    const lower = q.toLowerCase();
+    const words = ["price", "store"];
+    const needed = words.filter((w) => !lower.includes(w));
+    if (needed.length) q += " " + needed.slice(0, 2).join(" ");
   } else if (mode === "technical") {
     const lower = q.toLowerCase();
     const techWords = [];
@@ -752,12 +758,19 @@ export async function searchWeb(env, {
     }
   }
 
+  const ddgChallenged = () =>
+    errors.some((e) => /202|challenge/i.test(e));
+
   if (lowQuality()) {
     fallbacksAttempted.push("duckduckgo-lite", "bing-html");
-    const fallbackResults = await collectSearches([
-      searchDuckDuckGoLite(q, cap),
-      searchBingHtml(q, cap, market),
-    ], errors, "free-fallback");
+    const fallbackSearches = ddgChallenged()
+      ? [searchBingHtml(q, cap, market)]
+      : [searchDuckDuckGoLite(q, cap), searchBingHtml(q, cap, market)];
+    const fallbackResults = await collectSearches(
+      fallbackSearches,
+      errors,
+      "free-fallback",
+    );
     if (fallbackResults.length) {
       rawResults.push(...fallbackResults);
       const fallbackSources = new Set(
@@ -776,7 +789,10 @@ export async function searchWeb(env, {
   const marketQuery = buildMarketFallbackQuery(query, mode, market, domains);
   if (lowQuality() && marketQuery && marketQuery !== q) {
     fallbacksAttempted.push("market-localized");
-    const marketSearches = [searchDuckDuckGo(marketQuery, cap)];
+    const marketSearches = [];
+    if (!ddgChallenged()) {
+      marketSearches.push(searchDuckDuckGo(marketQuery, cap));
+    }
     if (env.ENABLE_BING_RSS === "1") {
       marketSearches.push(searchBingRss(marketQuery, cap, market));
     }
@@ -802,7 +818,9 @@ export async function searchWeb(env, {
   const cleanQuery = (query.trim() + domainClause(domains)).slice(0, 1000);
   if (lowQuality() && cleanQuery !== q && cleanQuery !== marketQuery) {
     fallbacksAttempted.push("clean-query");
-    const cleanSearches = [searchDuckDuckGo(cleanQuery, cap), searchBingHtml(cleanQuery, cap, market)];
+    const cleanSearches = ddgChallenged()
+      ? [searchBingHtml(cleanQuery, cap, market)]
+      : [searchDuckDuckGo(cleanQuery, cap), searchBingHtml(cleanQuery, cap, market)];
     const cleanResults = await collectSearches(
       cleanSearches,
       errors,
@@ -813,6 +831,26 @@ export async function searchWeb(env, {
       rawResults.push(...cleanResults);
       fallbacksUsed.push("clean-query");
       processed = postProcess(rawResults, query, domains, n);
+    }
+  }
+
+  if (mode === "technical" && lowQuality()) {
+    fallbacksAttempted.push("github-technical");
+    try {
+      const gh = await githubSearch(env, { query, limit: cap });
+      if (gh.results?.length) {
+        const ghResults = gh.results.map((r) => ({
+          title: r.name,
+          url: r.url,
+          description: r.description,
+          source: "github-technical",
+        }));
+        rawResults.push(...ghResults);
+        fallbacksUsed.push("github-technical");
+        processed = postProcess(rawResults, query, domains, n);
+      }
+    } catch (e) {
+      errors.push("github-fallback: " + String(e.message || e));
     }
   }
 
