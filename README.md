@@ -61,6 +61,7 @@ The validated ZIP archive will be created at `dist/cloudflare-search-mcp-skill.z
 | `multi_search` | Run several search angles concurrently and merge results |
 | `fetch_page` | Extract a public URL directly or with Browser Run |
 | `github_search` | Search GitHub repositories, issues/PRs, or code |
+| `google_grounded_search` | Optional Gemini 2.5 Flash Google Search-grounded answer from a verified, unbilled free-tier project |
 
 ## Security model
 
@@ -259,3 +260,18 @@ SEARXNG_HTML_ORIGINS=https://approved-html-backup.example.org
 `SEARXNG_HTML_ORIGINS` must contain exact public HTTPS origins from `SEARXNG_URL` or `SEARXNG_URLS`. Selected HTML hosts receive a **single** `GET /search?q=...` request without `format=json`. Other hosts continue using JSON. All results use the existing relevance and domain filters; timeouts, size limits, bounded sequential failover, and secret isolation still apply. **401, 403 and 429 stop the SearXNG chain**, rather than rotating to another public SearXNG host to bypass an access denial.
 
 HTML is not a guaranteed API and may have incomplete metadata. Access remains subject to the operator's rules and `robots.txt`. A browser-search page is **not** permission for automation. No public instances are enabled by default; do not configure hosts from the earlier probes without explicit permission. This optional capability requires no new hosting or paid search.
+
+## Optional Gemini 2.5 Flash + Google Search Grounding (free tier only)
+
+This integration is opt-in, not a replacement for ordinary web search. Google currently lists **500 free grounded prompts per day**, shared between Gemini 2.5 Flash and Flash-Lite, for API projects without billing enabled. The Worker uses only `gemini-2.5-flash`; it does not switch to paid models or backends.
+
+1. In [Google AI Studio API keys](https://aistudio.google.com/api-keys), choose a project whose Billing Tier is **Free tier** and shows **Set up billing**, not a paid project.
+2. In private Wrangler vars, set `GEMINI_GROUNDING_ENABLED` and `GEMINI_FREE_TIER_CONFIRMED` to `"1"`, and set `GROUNDING_PUBLIC_ORIGIN` to your HTTPS Worker origin.
+3. From the private deployment directory run `npx wrangler secret put GEMINI_API_KEY` and paste the Free Tier key at the CLI prompt. Never put keys in Git, `wrangler.jsonc`, or chats.
+4. Run `npm test`, then `npx wrangler deploy`. Verify `gemini_grounding` is `configured-free-only` on `/health` and call the `google_grounded_search` tool.
+
+**Safety:** The tool fails closed if its key, KV binding or explicit free-tier confirmation is missing. HTTP 429 stops without paid fallback. An advisory 400/day KV counter leaves margin below Google's 500/day allowance, but Cloudflare KV is eventually consistent, not an atomic global quota guarantee. Keep the Google API project **unbilled** to prevent charges; API keys inherit project billing status.
+
+**Google display requirements:** The tool provides a short-lived (`10 min`) `view_url` that displays Google's unmodified Search Suggestions and the grounded response with cited sources. Use that viewer when presenting the answer. Do not scrape, index, cache or republish grounded links.
+
+Google's free tier may use submitted prompts and responses to improve its products. Check its current policies before sending sensitive information.

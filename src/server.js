@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { googleGroundedSearch } from "./providers/gemini-grounding.js";
 import {
   searchWeb,
   multiSearch,
@@ -111,6 +112,30 @@ export function createServer(env = (typeof process !== "undefined" ? process.env
           ...jsonResult(page),
           structuredContent: page,
         };
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "google_grounded_search",
+    {
+      title: "Answer with Google Search Grounding (Gemini free tier)",
+      description: "Use Gemini 2.5 Flash Google Search grounding for a cited, current answer. Requires the unbilled free-tier project. Never uses paid fallbacks. Google's Search Suggestions must be shown exactly as provided together with the answer at view_url; link users to that page when displaying the answer. Do not harvest, index, crawl, or persist grounded links.",
+      inputSchema: {
+        query: z.string().min(3).max(600),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (args) => {
+      try {
+        const output = await googleGroundedSearch(env, args);
+        return { ...jsonResult(output), structuredContent: output };
       } catch (error) {
         return errorResult(error);
       }

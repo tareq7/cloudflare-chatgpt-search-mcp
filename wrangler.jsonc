@@ -16,6 +16,9 @@
   "vars": {
     "ALLOW_PAID_WEBSEARCH": "0",
     "ENABLE_BING_RSS": "0",
-    "WEBSEARCH_GATEWAY_ID": "default"
+    "WEBSEARCH_GATEWAY_ID": "default",
+    "GEMINI_GROUNDING_ENABLED": "0",
+    "GEMINI_FREE_TIER_CONFIRMED": "0",
+    "GROUNDING_PUBLIC_ORIGIN": "https://your-worker.your-subdomain.workers.dev"
   }
 }

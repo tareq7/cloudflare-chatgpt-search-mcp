@@ -27,6 +27,7 @@ test("createServer registers search, multi_search, fetch_page, and github_search
   assert.deepEqual(toolNames, [
     "fetch_page",
     "github_search",
+    "google_grounded_search",
     "multi_search",
     "search",
   ]);
