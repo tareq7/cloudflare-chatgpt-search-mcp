@@ -119,3 +119,23 @@ test("search and multi_search tools accept backend brave and domains parameter w
     globalThis.fetch = origFetch;
   }
 });
+
+
+test("fetch_page includes structured content and preserves text for MCP clients", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<html><body><main>Reliable extraction payload</main></body></html>", {
+    status: 200, headers: { "content-type": "text/html" },
+  });
+  try {
+    const server = createServer({});
+    const result = await server._registeredTools.fetch_page.handler({
+      url: "https://example.com/", render_js: false, max_chars: 1000,
+    });
+    assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent.renderer, "direct-fetch");
+    assert.match(result.structuredContent.content, /Reliable extraction payload/);
+    assert.equal(JSON.parse(result.content[0].text).content, result.structuredContent.content);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

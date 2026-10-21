@@ -106,7 +106,11 @@ export function createServer(env = (typeof process !== "undefined" ? process.env
     },
     async (args) => {
       try {
-        return jsonResult(await fetchPage(env, args));
+        const page = await fetchPage(env, args);
+        return {
+          ...jsonResult(page),
+          structuredContent: page,
+        };
       } catch (error) {
         return errorResult(error);
       }

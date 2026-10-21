@@ -692,6 +692,7 @@ async function searchDuckDuckGo(query, limit) {
       throw new Error("DuckDuckGo throttled (HTTP 202 cooldown active).");
     }
     const hosts = ["html.duckduckgo.com", "duckduckgo.com"];
+    let blockedHosts = 0;
     for (const host of hosts) {
       try {
         const url = "https://" + host + "/html/?q=" + encodeURIComponent(query);
@@ -710,10 +711,11 @@ async function searchDuckDuckGo(query, limit) {
         if (/result__a|result__snippet/i.test(html)) {
           throw new Error("DuckDuckGo parser found result markup but parsed zero results.");
         }
-      } catch {
-        // try next host
+      } catch (error) {
+        if (/HTTP 202|challenge|HTTP 429/i.test(String(error?.message || error))) blockedHosts++;
       }
     }
+    if (blockedHosts === hosts.length) markProviderCooldown("duckduckgo", 3_000);
     // If both html endpoints fail, try Lite with pacing jitter
     const jitter = 80 + Math.floor(Math.random() * 120);
     await new Promise((r) => setTimeout(r, jitter));
@@ -753,7 +755,7 @@ async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
             body: new URLSearchParams({ q: query }).toString(),
           });
           if (/bots use DuckDuckGo too|challenge to confirm this search/i.test(html)) {
-            markProviderCooldown("duckduckgo", 3_000);
+            markProviderCooldown("duckduckgo-lite", 3_000);
             throw new Error("DuckDuckGo Lite challenge encountered (throttled).");
           }
         }
@@ -779,7 +781,7 @@ async function searchDuckDuckGoLite(query, limit, needsQueue = true) {
           continue;
         }
         if (is202) {
-          markProviderCooldown("duckduckgo", 3_000);
+          markProviderCooldown("duckduckgo-lite", 3_000);
         }
         throw err;
       }
@@ -1456,30 +1458,35 @@ export async function fetchPage(env, {
     };
   }
 
-  const res = await fetch(safe, {
-    redirect: "follow",
-    headers: {
-      "User-Agent": UA,
-      "Accept": "text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.5",
-    },
-  });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-
-  const finalUrl = validatePublicUrl(res.url || safe);
-  const type = (res.headers.get("content-type") || "").toLowerCase();
-  if (!/(text|html|json|xml|javascript)/.test(type)) {
-    throw new Error("Unsupported content type: " + type);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(safe, {
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "User-Agent": UA,
+        "Accept": "text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.5",
+      },
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const finalUrl = validatePublicUrl(res.url || safe);
+    const type = (res.headers.get("content-type") || "").toLowerCase();
+    if (!/(text|html|json|xml|javascript)/.test(type)) {
+      throw new Error("Unsupported content type: " + type);
+    }
+    const raw = await readTextLimited(res, 2_000_000);
+    const text = type.includes("html") ? stripHtml(raw) : raw.trim();
+    return {
+      url: finalUrl,
+      renderer: "direct-fetch",
+      content_type: type,
+      content: text.slice(0, cap),
+      truncated: text.length > cap,
+    };
+  } finally {
+    clearTimeout(timer);
   }
-
-  const raw = await res.text();
-  const text = type.includes("html") ? stripHtml(raw) : raw.trim();
-  return {
-    url: finalUrl,
-    renderer: "direct-fetch",
-    content_type: type,
-    content: text.slice(0, cap),
-    truncated: text.length > cap,
-  };
 }
 
 export async function githubSearch(env, {
