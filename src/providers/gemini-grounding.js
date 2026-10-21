@@ -1,8 +1,12 @@
-// Gemini 3.8 Flash grounding remains compiled OFF under the absolute zero-charge policy.
-const ZERO_CHARGE_COMPILE_LOCK = true;
+// Gemini 3.8 Flash Google Search grounding. Explicit paid opt-in; NEVER called by ordinary search.
 const MODEL = "gemini-3.8-flash";
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent";
-const DAILY_BUDGET = 400; // Conservative advisory cap. Google's unbilled project quota is authoritative.
+const MAX_DAILY_REQUESTS = 2;
+const MAX_MONTHLY_REQUESTS = 10;
+const MAX_OUTPUT_TOKENS = 768;
+const RESERVATION_USD = 0.01; // Advisory worst-case budget reservation per call, NOT a billing ceiling.
+let lastIssuedAt = 0;
+let activeRequest = false;
 // The deployment origin is configured per Worker, never derived from untrusted request headers.
 const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => "&#" + c.charCodeAt(0) + ";");
 
@@ -33,35 +37,75 @@ function renderGroundedView(answer, sources, supports, suggestions) {
 }
 
 export function assertGeminiSpendPolicy(env) {
-  // A paid Gemini key cannot perform billable inference with an absolute $0 guarantee.
-  // Fail CLOSED unless a future, separately reviewed paid-use policy replaces this lock.
-  if (ZERO_CHARGE_COMPILE_LOCK || env.GEMINI_ZERO_SPEND_LOCK !== "0" ||
+  if (env.GEMINI_ZERO_SPEND_LOCK !== "0" ||
       env.GEMINI_OUTBOUND_ENABLED !== "1" ||
-      !(Number(env.GEMINI_SPEND_LIMIT_USD) > 0)) {
-    throw new Error("Gemini zero-spend lock: outbound paid inference and search grounding are blocked; no API request sent.");
+      env.GEMINI_GROUNDING_ENABLED !== "1" ||
+      env.GEMINI_API_KEY_TIER !== "paid" ||
+      !env.GEMINI_API_KEY || !env.OAUTH_KV || !env.GROUNDING_PUBLIC_ORIGIN ||
+      !/^https:\/\//i.test(env.GROUNDING_PUBLIC_ORIGIN) ||
+      !(Number(env.GEMINI_SPEND_LIMIT_USD) > 0) ||
+      Number(env.GEMINI_SPEND_LIMIT_USD) > 0.10) {
+    throw new Error("Gemini paid grounding disabled by policy; no outbound API request sent.");
   }
 }
 
-async function reserveRequest(env) {
+export async function reserveRequest(env, query) {
   assertGeminiSpendPolicy(env);
-  if (env.GEMINI_GROUNDING_ENABLED !== "1" ||
-      env.GEMINI_FREE_TIER_CONFIRMED !== "1" ||
-      !env.GEMINI_API_KEY || !env.OAUTH_KV || !env.GROUNDING_PUBLIC_ORIGIN ||
-      !/^https:\/\//i.test(env.GROUNDING_PUBLIC_ORIGIN)) {
-    throw new Error("Gemini grounding disabled: requires a verified unbilled free-tier API key and KV binding.");
+  if (typeof query !== "string" || query.trim().length < 3 || query.length > 350) {
+    throw new Error("Gemini request length must be 3–350 characters.");
   }
-  const day = new Date().toISOString().slice(0, 10);
-  const key = "gemini:free:grounding:" + day;
-  const used = Number(await env.OAUTH_KV.get(key) || 0);
-  if (used >= DAILY_BUDGET) throw new Error("Local Gemini free-tier safety budget reached; no paid fallback.");
-  await env.OAUTH_KV.put(key, String(used + 1), { expirationTtl: 172800 });
-  return { used: used + 1, budget: DAILY_BUDGET, advisory: true };
+  if (await env.OAUTH_KV.get("gemini:paid:billing-block")) {
+    throw new Error("Gemini paid-project prepayment is depleted (HTTP 402); blocked for 24 hours. Free search remains available.");
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const month = today.slice(0, 7);
+  const dayKey = "gemini:paid:day:" + today;
+  const monthKey = "gemini:paid:month:" + month;
+  const budgetKey = "gemini:paid:budget:" + month;
+  const [dayUsed, monthUsed, budgetUsed] = await Promise.all([
+    env.OAUTH_KV.get(dayKey), env.OAUTH_KV.get(monthKey), env.OAUTH_KV.get(budgetKey)
+  ]);
+  const d = Number(dayUsed || 0);
+  const m = Number(monthUsed || 0);
+  const b = Number(budgetUsed || 0);
+  if (!Number.isFinite(d + m + b) || d >= MAX_DAILY_REQUESTS ||
+      m >= MAX_MONTHLY_REQUESTS ||
+      b + RESERVATION_USD > Number(env.GEMINI_SPEND_LIMIT_USD) + 0.000001) {
+    throw new Error("Local paid-Gemini advisory request or cost budget reached; use free search.");
+  }
+  // Reserve BEFORE calling Google. KV consistency is eventual; caps are not atomic/global.
+  await Promise.all([
+    env.OAUTH_KV.put(dayKey, String(d + 1), { expirationTtl: 172800 }),
+    env.OAUTH_KV.put(monthKey, String(m + 1), { expirationTtl: 3456000 }),
+    env.OAUTH_KV.put(budgetKey, String(Number((b + RESERVATION_USD).toFixed(4))), { expirationTtl: 3456000 })
+  ]);
+  return {
+    day_used: d + 1, day_limit: MAX_DAILY_REQUESTS,
+    month_used: m + 1, month_limit: MAX_MONTHLY_REQUESTS,
+    advisory_reserved_usd: Number((b + RESERVATION_USD).toFixed(4)),
+    advisory_budget_usd: Number(env.GEMINI_SPEND_LIMIT_USD),
+    enforcement: "best-effort KV; billing cap may lag, no hard charge guarantee"
+  };
 }
 
 export async function googleGroundedSearch(env, { query }) {
-  const budget = await reserveRequest(env);
+  assertGeminiSpendPolicy(env);
+  if (activeRequest || Date.now() - lastIssuedAt < 120000) {
+    throw new Error("Gemini local cooldown or in-flight request; use free search or retry later.");
+  }
+  activeRequest = true;
+  try {
+    const budget = await reserveRequest(env, query);
+    lastIssuedAt = Date.now();
+    return await executeGroundedRequest(env, query, budget);
+  } finally {
+    activeRequest = false;
+  }
+}
+
+async function executeGroundedRequest(env, query, budget) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
+  const timer = setTimeout(() => controller.abort(), 15000);
   let response;
   try {
     response = await fetch(ENDPOINT, {
@@ -69,17 +113,25 @@ export async function googleGroundedSearch(env, { query }) {
       signal: controller.signal,
       headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
       body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: query }] }],
+        contents: [{ role: "user", parts: [{ text: "Answer briefly and accurately using Google Search evidence. Query: " + query }] }],
         tools: [{ google_search: {} }],
-        generationConfig: { maxOutputTokens: 2048, temperature: 0.2 },
+        generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS, temperature: 0.1, thinkingConfig: { thinkingLevel: "low" } },
       }),
     });
   } finally {
     clearTimeout(timer);
   }
   if (!response.ok) {
-    if (response.status === 429) throw new Error("Gemini free-tier rate limit or daily quota reached; no paid fallback.");
-    throw new Error("Gemini grounded API HTTP " + response.status + "; no paid fallback.");
+    if (response.status === 402) {
+      await env.OAUTH_KV.put("gemini:paid:billing-block", "402", { expirationTtl: 86400 });
+      throw new Error("Gemini prepayment credits depleted (HTTP 402); blocked further Gemini calls for 24 hours. No auto-reload or billing change was made.");
+    }
+    if (response.status === 429) throw new Error("Gemini quota/rate limit reached; no retries or paid fallback.");
+    const upstreamError = await response.json().catch(() => ({}));
+    const detail = String(upstreamError?.error?.message || upstreamError?.error?.status || "")
+      .replaceAll(env.GEMINI_API_KEY, "[redacted]").slice(0, 450);
+    throw new Error("Gemini grounded API HTTP " + response.status +
+      (detail ? ": " + detail : "") + "; no paid fallback.");
   }
   const data = await response.json();
   const candidate = data?.candidates?.[0];
@@ -97,7 +149,7 @@ export async function googleGroundedSearch(env, { query }) {
   const page = renderGroundedView(answer, sources, supports, suggestions);
   await env.OAUTH_KV.put("gemini:grounded:view:" + token, page, { expirationTtl: 600 });
   return {
-    backend: "gemini-2.5-flash-google-search", model: MODEL, grounded: true,
+    backend: "gemini-3.8-flash-google-search", model: MODEL, grounded: true,
     query, answer, sources, grounding_supports: supports,
     google_search_queries: grounding.webSearchQueries || [],
     view_url: new URL(env.GROUNDING_PUBLIC_ORIGIN).origin + "/grounded/" + token,

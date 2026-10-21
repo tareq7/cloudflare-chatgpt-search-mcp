@@ -1,57 +1,105 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { googleGroundedSearch, assertGeminiSpendPolicy } from "../src/providers/gemini-grounding.js";
+import { googleGroundedSearch, assertGeminiSpendPolicy, reserveRequest } from "../src/providers/gemini-grounding.js";
 import { createServer } from "../src/server.js";
 
-const paidEnv = (overrides = {}) => ({
-  GEMINI_API_KEY: "synthetic-paid-key-no-real-usage",
-  GEMINI_API_KEY_TIER: "paid",
-  GEMINI_ZERO_SPEND_LOCK: "1",
-  GEMINI_OUTBOUND_ENABLED: "0",
-  GEMINI_SPEND_LIMIT_USD: "0",
-  GEMINI_GROUNDING_ENABLED: "1",
-  GEMINI_FREE_TIER_CONFIRMED: "1",
-  GROUNDING_PUBLIC_ORIGIN: "https://example.com",
-  OAUTH_KV: { get: async () => "0", put: async () => { throw new Error("KV must not be written"); } },
-  ...overrides,
-});
+function fixture(overrides = {}) {
+  const values = new Map();
+  return {
+    GEMINI_API_KEY: "FAKE_TEST_KEY",
+    GEMINI_API_KEY_TIER: "paid",
+    GEMINI_ZERO_SPEND_LOCK: "0",
+    GEMINI_OUTBOUND_ENABLED: "1",
+    GEMINI_GROUNDING_ENABLED: "1",
+    GEMINI_SPEND_LIMIT_USD: "0.10",
+    GROUNDING_PUBLIC_ORIGIN: "https://example.com",
+    OAUTH_KV: {
+      get: async (key) => values.get(key) ?? null,
+      put: async (key,value) => { values.set(key,value); },
+    },
+    __values: values,
+    ...overrides,
+  };
+}
 
-test("paid Gemini key is prohibited with zero-spend policy", async () => {
-  assert.throws(() => assertGeminiSpendPolicy(paidEnv()), /zero-spend lock/);
-  await assert.rejects(() => googleGroundedSearch(paidEnv(), { query: "Cloudflare docs" }), /zero-spend lock/);
-});
-
-test("accidental environment overrides still cannot enable paid calls", async () => {
-  assert.throws(() => assertGeminiSpendPolicy(paidEnv({
-    GEMINI_ZERO_SPEND_LOCK: "0", GEMINI_OUTBOUND_ENABLED: "1",
-    GEMINI_SPEND_LIMIT_USD: "1000000"
-  })), /zero-spend lock/);
-});
-
-test("concurrent requests, including MCP tool calls, never reach Gemini", async () => {
-  const prev = globalThis.fetch;
-  let outbound = 0;
-  globalThis.fetch = async () => { outbound++; throw new Error("CRITICAL: outbound request made"); };
-  try {
-    const env = paidEnv({ GEMINI_ZERO_SPEND_LOCK: "0",
-      GEMINI_OUTBOUND_ENABLED: "1", GEMINI_SPEND_LIMIT_USD: "1000000" });
-    const server = createServer(env);
-    await Promise.all(Array.from({ length: 60 }, () =>
-      assert.rejects(() => googleGroundedSearch(env, { query: "Gemini free?" }), /zero-spend lock/)
-    ));
-    const result = await server._registeredTools.google_grounded_search.handler({ query: "Hello from ChatGPT" });
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /zero-spend lock/);
-    assert.equal(outbound, 0);
-  } finally {
-    globalThis.fetch = prev;
+test("guard fails closed for missing paid opt-in, no key, or invalid budget", async () => {
+  for (const o of [
+    { GEMINI_ZERO_SPEND_LOCK: "1" },
+    { GEMINI_OUTBOUND_ENABLED: "0" },
+    { GEMINI_GROUNDING_ENABLED: "0" },
+    { GEMINI_API_KEY_TIER: "unverified" },
+    { GEMINI_API_KEY: "" },
+    { GEMINI_SPEND_LIMIT_USD: "0" },
+    { GEMINI_SPEND_LIMIT_USD: "10" },
+  ]) {
+    assert.throws(() => assertGeminiSpendPolicy(fixture(o)), /disabled by policy/);
   }
 });
 
-test("compiled Gemini lock and zero price are explicit in production implementation", () => {
-  const source = readFileSync(new URL("../src/providers/gemini-grounding.js", import.meta.url), "utf8");
-  assert.match(source, /const ZERO_CHARGE_COMPILE_LOCK = true;/);
-  assert.match(source, /ZERO_CHARGE_COMPILE_LOCK \|\|/);
-  assert.match(source, /assertGeminiSpendPolicy\(env\);/);
+test("advisory quotas reserve before API calls and reject monthly/day exhaustion", async () => {
+  const e = fixture();
+  await assert.rejects(() => reserveRequest(e, "X".repeat(351)), /3–350/);
+  const one = await reserveRequest(e, "Cloudflare Workers");
+  assert.equal(one.day_used, 1);
+  assert.equal(one.month_used, 1);
+  assert.equal(one.advisory_reserved_usd, 0.01);
+  const two = await reserveRequest(e, "Cloudflare Workers API");
+  assert.equal(two.day_used, 2);
+  await assert.rejects(() => reserveRequest(e, "third request"), /budget reached/);
+  const d = new Date().toISOString().slice(0,10);
+  e.__values.set("gemini:paid:day:"+d,"0");
+  e.__values.set("gemini:paid:month:"+d.slice(0,7),"10");
+  await assert.rejects(() => reserveRequest(e, "monthly exhausted"), /budget reached/);
+});
+
+test("depleted Gemini prepay blocks subsequent requests locally", async () => {
+  const e = fixture();
+  e.__values.set("gemini:paid:billing-block", "402");
+  const previousFetch = globalThis.fetch;
+  let count = 0;
+  globalThis.fetch = async () => { count++; throw new Error("Unexpected outbound fetch"); };
+  try {
+    await assert.rejects(() => googleGroundedSearch(e, { query: "Live Cloudflare docs" }), /prepayment is depleted/);
+    assert.equal(count, 0);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("opt-in Gemini request returns sources and mandatory Google search suggestions", async () => {
+  const original = globalThis.fetch;
+  let count = 0;
+  globalThis.fetch = async (url, options) => {
+    count++;
+    assert.match(String(url), /gemini-3\.8-flash:generateContent$/);
+    assert.equal(options.headers["x-goog-api-key"], "FAKE_TEST_KEY");
+    const payload = JSON.parse(options.body);
+    assert.ok(payload.tools[0].google_search);
+    assert.equal(payload.generationConfig.maxOutputTokens,768);
+    assert.equal(payload.generationConfig.thinkingConfig.thinkingLevel,"low");
+    return Response.json({ candidates: [{
+      content: { parts: [{text:"Cloudflare Workers is serverless."}] },
+      groundingMetadata: {
+        groundingChunks: [{web:{title:"Official Cloudflare Docs",uri:"https://developers.cloudflare.com/workers/"}}],
+        groundingSupports: [{ segment:{text:"Cloudflare Workers is serverless."},groundingChunkIndices:[0] }],
+        searchEntryPoint:{renderedContent:'<a href="https://google.com/search?q=workers">Google Search</a>'},
+        webSearchQueries:["cloudflare workers"]
+      }
+    }]});
+  };
+  try {
+    const e=fixture();
+    const result=await googleGroundedSearch(e,{query:"Cloudflare Workers?"});
+    assert.equal(count,1);
+    assert.equal(result.model,"gemini-3.8-flash");
+    assert.equal(result.grounded,true);
+    assert.equal(result.local_quota.day_used,1);
+    assert.equal(result.sources.length,1);
+    assert.match(result.view_url,/\/grounded\/[0-9a-f]{48}$/);
+    const html=await e.OAUTH_KV.get("gemini:grounded:view:"+result.view_url.split("/").at(-1));
+    assert.match(html,/Google Search/);
+    assert.match(html,/Official Cloudflare Docs/);
+    const blocked=await createServer(e)._registeredTools.google_grounded_search.handler({query:"repeat immediately"});
+    assert.equal(blocked.isError,true);
+    assert.match(blocked.content[0].text,/cooldown/);
+    assert.equal(count,1);
+  } finally { globalThis.fetch=original; }
 });

@@ -121,8 +121,8 @@ export function createServer(env = (typeof process !== "undefined" ? process.env
   server.registerTool(
     "google_grounded_search",
     {
-      title: "Google Search Grounding (disabled by zero-spend lock)",
-      description: "Gemini 3.8 Flash Google Search grounding is unavailable while the immutable zero-spend lock is active. Paid-project API inference may incur charges. Never uses paid fallbacks. Google's Search Suggestions must be shown exactly as provided together with the answer at view_url; link users to that page when displaying the answer. Do not harvest, index, crawl, or persist grounded links.",
+      title: "Google Search Grounding (Gemini 3.8 Flash, limited paid API)",
+      description: "Opt-in, rate-limited Gemini 3.8 Flash Google Search grounding using a paid-tier key. Model tokens may incur charges even while Google Search requests are within the free allowance. A separate Google project spend cap may reject requests and may lag. Never automatically call this for ordinary search. Never uses paid fallbacks. Google's Search Suggestions must be shown exactly as provided together with the answer at view_url; link users to that page when displaying the answer. Do not harvest, index, crawl, or persist grounded links.",
       inputSchema: {
         query: z.string().min(3).max(600),
       },
