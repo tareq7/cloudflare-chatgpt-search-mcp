@@ -71,7 +71,7 @@ export async function geminiFreeResearch(env, args, deps = {}) {
       "Evidence: " + JSON.stringify(evidence)
     ].join("\n");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12000);
+    const timer = setTimeout(() => controller.abort(), 25000);
     let response;
     try {
       response = await (deps.geminiFetch || fetch)(ENDPOINT, {

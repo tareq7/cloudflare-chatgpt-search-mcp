@@ -288,7 +288,7 @@ The old google_grounded_search tool is removed. The new tool never automatically
 runs within ordinary search calls and has no paid fallback.
 
 Safety: up to 12 advisory Gemini inference calls/day via Cloudflare KV, maximum
-250-character questions, five retrieved sources, 900 output tokens, a 12-second
+250-character questions, five retrieved sources, 900 output tokens, a 25-second
 timeout, one in-flight call per Worker isolate, 15-second isolate cooldown, and
 no retries. Google enforces the actual Free Tier quotas; KV is not a globally
 atomic rate limiter. The model returns source identifiers corresponding to the
