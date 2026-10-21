@@ -1,5 +1,6 @@
-// Gemini 2.5 Flash grounded answers. Requires an independently verified, unbilled free-tier project.
-const MODEL = "gemini-2.5-flash";
+// Gemini 3.8 Flash grounding remains compiled OFF under the absolute zero-charge policy.
+const ZERO_CHARGE_COMPILE_LOCK = true;
+const MODEL = "gemini-3.8-flash";
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent";
 const DAILY_BUDGET = 400; // Conservative advisory cap. Google's unbilled project quota is authoritative.
 // The deployment origin is configured per Worker, never derived from untrusted request headers.
@@ -31,7 +32,18 @@ function renderGroundedView(answer, sources, supports, suggestions) {
     '<h2>Supporting sources</h2><ol>' + references + '</ol></body></html>';
 }
 
+export function assertGeminiSpendPolicy(env) {
+  // A paid Gemini key cannot perform billable inference with an absolute $0 guarantee.
+  // Fail CLOSED unless a future, separately reviewed paid-use policy replaces this lock.
+  if (ZERO_CHARGE_COMPILE_LOCK || env.GEMINI_ZERO_SPEND_LOCK !== "0" ||
+      env.GEMINI_OUTBOUND_ENABLED !== "1" ||
+      !(Number(env.GEMINI_SPEND_LIMIT_USD) > 0)) {
+    throw new Error("Gemini zero-spend lock: outbound paid inference and search grounding are blocked; no API request sent.");
+  }
+}
+
 async function reserveRequest(env) {
+  assertGeminiSpendPolicy(env);
   if (env.GEMINI_GROUNDING_ENABLED !== "1" ||
       env.GEMINI_FREE_TIER_CONFIRMED !== "1" ||
       !env.GEMINI_API_KEY || !env.OAUTH_KV || !env.GROUNDING_PUBLIC_ORIGIN ||

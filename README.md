@@ -261,17 +261,44 @@ SEARXNG_HTML_ORIGINS=https://approved-html-backup.example.org
 
 HTML is not a guaranteed API and may have incomplete metadata. Access remains subject to the operator's rules and `robots.txt`. A browser-search page is **not** permission for automation. No public instances are enabled by default; do not configure hosts from the earlier probes without explicit permission. This optional capability requires no new hosting or paid search.
 
-## Optional Gemini 2.5 Flash + Google Search Grounding (free tier only)
+## Gemini 3.8 Flash with a paid-project key — ZERO SPEND MODE
 
-This integration is opt-in, not a replacement for ordinary web search. Google currently lists **500 free grounded prompts per day**, shared between Gemini 2.5 Flash and Flash-Lite, for API projects without billing enabled. The Worker uses only `gemini-2.5-flash`; it does not switch to paid models or backends.
+Paid-tier Gemini requests incur token charges starting with the first successful inference request.
+Free Google Search grounding quotas do NOT make the underlying paid-tier model tokens free.
+Google's spend caps and budget alerts can lag and are not a guaranteed zero-dollar cutoff.
 
-1. In [Google AI Studio API keys](https://aistudio.google.com/api-keys), choose a project whose Billing Tier is **Free tier** and shows **Set up billing**, not a paid project.
-2. In private Wrangler vars, set `GEMINI_GROUNDING_ENABLED` and `GEMINI_FREE_TIER_CONFIRMED` to `"1"`, and set `GROUNDING_PUBLIC_ORIGIN` to your HTTPS Worker origin.
-3. From the private deployment directory run `npx wrangler secret put GEMINI_API_KEY` and paste the Free Tier key at the CLI prompt. Never put keys in Git, `wrangler.jsonc`, or chats.
-4. Run `npm test`, then `npx wrangler deploy`. Verify `gemini_grounding` is `configured-free-only` on `/health` and call the `google_grounded_search` tool.
+This Worker has a **compile-time block** (ZERO_CHARGE_COMPILE_LOCK = true in
+src/providers/gemini-grounding.js) that prevents outbound Gemini inference.
+Three additional production configuration guards provide defense in depth:
 
-**Safety:** The tool fails closed if its key, KV binding or explicit free-tier confirmation is missing. HTTP 429 stops without paid fallback. An advisory 400/day KV counter leaves margin below Google's 500/day allowance, but Cloudflare KV is eventually consistent, not an atomic global quota guarantee. Keep the Google API project **unbilled** to prevent charges; API keys inherit project billing status.
+- GEMINI_ZERO_SPEND_LOCK = "1": explicit environment-level kill switch.
+- GEMINI_OUTBOUND_ENABLED = "0": independently disables Gemini egress.
+- GEMINI_SPEND_LIMIT_USD = "0": no positive paid-call budget.
 
-**Google display requirements:** The tool provides a short-lived (`10 min`) `view_url` that displays Google's unmodified Search Suggestions and the grounded response with cited sources. Use that viewer when presenting the answer. Do not scrape, index, cache or republish grounded links.
+The obsolete Gemini 2.5 model has been replaced in code by the gemini-3.8-flash
+model identifier, but requests are deliberately blocked BEFORE accessing the Google API.
+Do not remove the compile-time lock or change these guards if your requirement remains
+NEVER GENERATE CHARGES. All ordinary DuckDuckGo, Bing, RSS, GitHub and page-extraction
+tools remain available.
 
-Google's free tier may use submitted prompts and responses to improve its products. Check its current policies before sending sensitive information.
+### Install a paid-project API key safely
+
+In your PRIVATE deployment only, run the Wrangler command:
+    npx wrangler secret put GEMINI_API_KEY
+Paste the key for your intended paid-tier project at Wrangler's interactive prompt.
+Do NOT paste it into chat, commit it, set it in wrangler.jsonc, or copy it to
+the public repository. Changing the secret does NOT enable Gemini requests.
+
+After secret installation, change GEMINI_API_KEY_TIER in the PRIVATE Wrangler vars
+from awaiting_paid_key to paid and deploy. /health should continue to report
+gemini_grounding: zero-spend-locked and gemini_outbound_enabled: false.
+
+For additional safeguards, use a dedicated restricted Gemini API key, project spend
+caps, budget alerts, and if supported a Prepay plan with auto-reload OFF. None can
+guarantee zero charges on a paid project; other apps sharing the project can accrue
+charges independently.
+
+Official references:
+- https://ai.google.dev/gemini-api/docs/pricing
+- https://ai.google.dev/gemini-api/docs/billing
+- https://docs.cloud.google.com/billing/docs/how-to/budgets

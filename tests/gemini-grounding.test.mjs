@@ -1,64 +1,57 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { googleGroundedSearch } from "../src/providers/gemini-grounding.js";
+import { readFileSync } from "node:fs";
+import { googleGroundedSearch, assertGeminiSpendPolicy } from "../src/providers/gemini-grounding.js";
+import { createServer } from "../src/server.js";
 
-function fakeEnv(overrides = {}) {
-  const state = new Map();
-  return {
-    GEMINI_GROUNDING_ENABLED: "1", GEMINI_FREE_TIER_CONFIRMED: "1",
-    GEMINI_API_KEY: "fake-unbilled-key",
-    GROUNDING_PUBLIC_ORIGIN: "https://example.com",
-    OAUTH_KV: {
-      async get(k) { return state.get(k) || null; },
-      async put(k, v) { state.set(k, v); },
-    },
-    ...overrides,
-  };
-}
-test("free-tier gate fails closed when billing safety confirmation is missing", async () => {
-  await assert.rejects(
-    () => googleGroundedSearch(fakeEnv({ GEMINI_FREE_TIER_CONFIRMED: "0" }), { query: "test query" }),
-    /disabled.*unbilled/,
-  );
+const paidEnv = (overrides = {}) => ({
+  GEMINI_API_KEY: "synthetic-paid-key-no-real-usage",
+  GEMINI_API_KEY_TIER: "paid",
+  GEMINI_ZERO_SPEND_LOCK: "1",
+  GEMINI_OUTBOUND_ENABLED: "0",
+  GEMINI_SPEND_LIMIT_USD: "0",
+  GEMINI_GROUNDING_ENABLED: "1",
+  GEMINI_FREE_TIER_CONFIRMED: "1",
+  GROUNDING_PUBLIC_ORIGIN: "https://example.com",
+  OAUTH_KV: { get: async () => "0", put: async () => { throw new Error("KV must not be written"); } },
+  ...overrides,
 });
-test("Gemini free grounding returns sources, suggestion viewer and bounded daily quota", async () => {
-  const orig = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async (url, opts) => {
-    calls++;
-    assert.match(url, /gemini-2\.5-flash:generateContent$/);
-    assert.equal(opts.headers["x-goog-api-key"], "fake-unbilled-key");
-    assert.equal(JSON.parse(opts.body).tools[0].google_search !== undefined, true);
-    return Response.json({ candidates: [{
-      content: { parts: [{ text: "Cloudflare Workers are serverless." }] },
-      groundingMetadata: {
-        groundingChunks: [{ web: { title: "Cloudflare Docs", uri: "https://developers.cloudflare.com/workers/" } }],
-        groundingSupports: [{ segment: { text: "Cloudflare Workers are serverless." }, groundingChunkIndices: [0] }],
-        webSearchQueries: ["Cloudflare Workers docs"],
-        searchEntryPoint: { renderedContent: '<a href="https://google.com/search?q=cloudflare">Google search</a>' },
-      },
-    }] });
-  };
-  try {
-    const env = fakeEnv();
-    const result = await googleGroundedSearch(env, { query: "What is Cloudflare Workers?" });
-    assert.equal(result.model, "gemini-2.5-flash");
-    assert.equal(result.grounded, true);
-    assert.equal(result.sources.length, 1);
-    assert.match(result.view_url, /\/grounded\/[0-9a-f]{48}$/);
-    assert.equal(result.local_quota.used, 1);
-    assert.equal(calls, 1);
-    const id = result.view_url.split("/").at(-1);
-    const page = await env.OAUTH_KV.get("gemini:grounded:view:" + id);
-    assert.match(page, /Google search/);
-    assert.match(page, /Cloudflare Workers are serverless/);
-    assert.match(page, /Cloudflare Docs/);
-  } finally { globalThis.fetch = orig; }
+
+test("paid Gemini key is prohibited with zero-spend policy", async () => {
+  assert.throws(() => assertGeminiSpendPolicy(paidEnv()), /zero-spend lock/);
+  await assert.rejects(() => googleGroundedSearch(paidEnv(), { query: "Cloudflare docs" }), /zero-spend lock/);
 });
-test("429 quota errors cannot trigger a paid fallback", async () => {
-  const orig = globalThis.fetch;
-  globalThis.fetch = async () => new Response("", { status: 429 });
+
+test("accidental environment overrides still cannot enable paid calls", async () => {
+  assert.throws(() => assertGeminiSpendPolicy(paidEnv({
+    GEMINI_ZERO_SPEND_LOCK: "0", GEMINI_OUTBOUND_ENABLED: "1",
+    GEMINI_SPEND_LIMIT_USD: "1000000"
+  })), /zero-spend lock/);
+});
+
+test("concurrent requests, including MCP tool calls, never reach Gemini", async () => {
+  const prev = globalThis.fetch;
+  let outbound = 0;
+  globalThis.fetch = async () => { outbound++; throw new Error("CRITICAL: outbound request made"); };
   try {
-    await assert.rejects(() => googleGroundedSearch(fakeEnv(), { query: "test query" }), /no paid fallback/);
-  } finally { globalThis.fetch = orig; }
+    const env = paidEnv({ GEMINI_ZERO_SPEND_LOCK: "0",
+      GEMINI_OUTBOUND_ENABLED: "1", GEMINI_SPEND_LIMIT_USD: "1000000" });
+    const server = createServer(env);
+    await Promise.all(Array.from({ length: 60 }, () =>
+      assert.rejects(() => googleGroundedSearch(env, { query: "Gemini free?" }), /zero-spend lock/)
+    ));
+    const result = await server._registeredTools.google_grounded_search.handler({ query: "Hello from ChatGPT" });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /zero-spend lock/);
+    assert.equal(outbound, 0);
+  } finally {
+    globalThis.fetch = prev;
+  }
+});
+
+test("compiled Gemini lock and zero price are explicit in production implementation", () => {
+  const source = readFileSync(new URL("../src/providers/gemini-grounding.js", import.meta.url), "utf8");
+  assert.match(source, /const ZERO_CHARGE_COMPILE_LOCK = true;/);
+  assert.match(source, /ZERO_CHARGE_COMPILE_LOCK \|\|/);
+  assert.match(source, /assertGeminiSpendPolicy\(env\);/);
 });

@@ -127,7 +127,9 @@ const DefaultHandler = {
         authentication: "OAuth 2.1 + PKCE + ChatGPT CIMD allowlist",
         paid_web_search_enabled: env.ALLOW_PAID_WEBSEARCH === "1",
         tools: ["search", "multi_search", "fetch_page", "github_search", "google_grounded_search"],
-        gemini_grounding: env.GEMINI_GROUNDING_ENABLED === "1" && env.GEMINI_FREE_TIER_CONFIRMED === "1" && Boolean(env.GEMINI_API_KEY) ? "configured-free-only" : "disabled",
+        gemini_grounding: "zero-spend-locked",
+        gemini_outbound_enabled: false,
+        gemini_key_status: env.GEMINI_API_KEY_TIER || "unverified",
       }, { headers: { "Cache-Control": "no-store" } });
     }
 
