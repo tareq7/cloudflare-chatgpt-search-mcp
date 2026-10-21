@@ -119,7 +119,6 @@ const DefaultHandler = {
     }
 
     if (url.pathname === "/" || url.pathname === "/health") {
-      const geminiBillingBlocked = Boolean(await env.OAUTH_KV?.get("gemini:paid:billing-block"));
       return Response.json({
         ok: true,
         service: "Cloudflare Search MCP",
@@ -127,11 +126,10 @@ const DefaultHandler = {
         mcp: "/mcp",
         authentication: "OAuth 2.1 + PKCE + ChatGPT CIMD allowlist",
         paid_web_search_enabled: env.ALLOW_PAID_WEBSEARCH === "1",
-        tools: ["search", "multi_search", "fetch_page", "github_search", "google_grounded_search"],
-        gemini_grounding: geminiBillingBlocked ? "prepay-depleted" : env.GEMINI_GROUNDING_ENABLED === "1" && env.GEMINI_OUTBOUND_ENABLED === "1" && env.GEMINI_ZERO_SPEND_LOCK === "0" && Boolean(env.GEMINI_API_KEY) ? "enabled-paid-opt-in" : "disabled",
-        gemini_outbound_enabled: env.GEMINI_OUTBOUND_ENABLED === "1" && env.GEMINI_ZERO_SPEND_LOCK === "0",
-        gemini_limits: { requests_per_day: 2, requests_per_month: 10, local_estimated_budget_usd: 0.10 },
-        gemini_key_status: env.GEMINI_API_KEY_TIER || "unverified",
+        tools: ["search", "multi_search", "fetch_page", "github_search", "gemini_free_research"],
+        gemini_grounding: "disabled-free-tier",
+        gemini_free_research: env.GEMINI_FREE_ENABLED === "1" && env.GEMINI_FREE_PROJECT_CONFIRMED === "1" && Boolean(env.GEMINI_FREE_API_KEY) ? "enabled" : "awaiting-unbilled-key",
+        gemini_free_limits: { requests_per_day: 12, model: "gemini-3.8-flash", google_search_grounding: false },
       }, { headers: { "Cache-Control": "no-store" } });
     }
 

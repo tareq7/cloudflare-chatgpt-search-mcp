@@ -26,8 +26,8 @@ test("createServer registers search, multi_search, fetch_page, and github_search
   const toolNames = Object.keys(server._registeredTools).sort();
   assert.deepEqual(toolNames, [
     "fetch_page",
+    "gemini_free_research",
     "github_search",
-    "google_grounded_search",
     "multi_search",
     "search",
   ]);

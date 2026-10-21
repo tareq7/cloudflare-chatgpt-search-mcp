@@ -18,11 +18,8 @@
     "ENABLE_BING_RSS": "0",
     "WEBSEARCH_GATEWAY_ID": "default",
     "GEMINI_GROUNDING_ENABLED": "0",
-    "GEMINI_ZERO_SPEND_LOCK": "1",
     "GEMINI_OUTBOUND_ENABLED": "0",
-    "GEMINI_SPEND_LIMIT_USD": "0",
-    "GEMINI_API_KEY_TIER": "awaiting_paid_key",
-    "GEMINI_FREE_TIER_CONFIRMED": "0",
-    "GROUNDING_PUBLIC_ORIGIN": "https://your-worker.your-subdomain.workers.dev"
+    "GEMINI_FREE_ENABLED": "0",
+    "GEMINI_FREE_PROJECT_CONFIRMED": "0"
   }
 }

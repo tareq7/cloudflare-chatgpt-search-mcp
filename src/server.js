@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { googleGroundedSearch } from "./providers/gemini-grounding.js";
+import { geminiFreeResearch } from "./providers/gemini-free.js";
 import {
   searchWeb,
   multiSearch,
@@ -119,22 +119,20 @@ export function createServer(env = (typeof process !== "undefined" ? process.env
   );
 
   server.registerTool(
-    "google_grounded_search",
+    "gemini_free_research",
     {
-      title: "Google Search Grounding (Gemini 3.8 Flash, limited paid API)",
-      description: "Opt-in, rate-limited Gemini 3.8 Flash Google Search grounding using a paid-tier key. Model tokens may incur charges even while Google Search requests are within the free allowance. A separate Google project spend cap may reject requests and may lag. Never automatically call this for ordinary search. Never uses paid fallbacks. Google's Search Suggestions must be shown exactly as provided together with the answer at view_url; link users to that page when displaying the answer. Do not harvest, index, crawl, or persist grounded links.",
+      title: "Research with free search sources and free-tier Gemini 3.8 Flash",
+      description: "Optional two-stage research: find current URLs using independent free search providers, then ask an unbilled Gemini 3.8 Flash API project to summarize the search snippets with source IDs. NO built-in Google Search Grounding and NO paid Gemini API key. Ordinary search and multi_search stay model-free. A verified unbilled free-tier key is required. No paid fallback or automatic retries.",
       inputSchema: {
-        query: z.string().min(3).max(600),
+        query: z.string().min(3).max(250),
+        mode: z.enum(["web", "technical", "supplier", "commerce", "news"]).optional().default("web"),
+        market: z.enum(["global", "SA", "AE", "CN"]).optional().default("global"),
       },
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        openWorldHint: true,
-      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     async (args) => {
       try {
-        const output = await googleGroundedSearch(env, args);
+        const output = await geminiFreeResearch(env, args);
         return { ...jsonResult(output), structuredContent: output };
       } catch (error) {
         return errorResult(error);

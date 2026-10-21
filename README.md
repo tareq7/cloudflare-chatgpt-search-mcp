@@ -61,7 +61,7 @@ The validated ZIP archive will be created at `dist/cloudflare-search-mcp-skill.z
 | `multi_search` | Run several search angles concurrently and merge results |
 | `fetch_page` | Extract a public URL directly or with Browser Run |
 | `github_search` | Search GitHub repositories, issues/PRs, or code |
-| `google_grounded_search` | Optional Gemini 2.5 Flash Google Search-grounded answer from a verified, unbilled free-tier project |
+| `gemini_free_research` | Optional evidence-backed answers using independent free search sources + unbilled Gemini 3.8 Flash inference (no Google Search Grounding) |
 
 ## Security model
 
@@ -261,40 +261,41 @@ SEARXNG_HTML_ORIGINS=https://approved-html-backup.example.org
 
 HTML is not a guaranteed API and may have incomplete metadata. Access remains subject to the operator's rules and `robots.txt`. A browser-search page is **not** permission for automation. No public instances are enabled by default; do not configure hosts from the earlier probes without explicit permission. This optional capability requires no new hosting or paid search.
 
-## Opt-in Gemini 3.8 Flash Google Search grounding
+## Free-tier Gemini 3.8 Flash research (NO paid Google Search Grounding)
 
-The optional google_grounded_search tool uses gemini-3.8-flash and Google's google_search tool.
-A paid API project can charge for **model input and output tokens**, even when grounded
-Google searches are within a separate monthly free allotment.
+The optional gemini_free_research tool searches first using the existing independent
+free sources, then summarizes those results with gemini-3.8-flash using an API key
+from a **verified Google AI Studio Free Tier project without billing**.
 
-The Worker never uses Gemini in ordinary search or multi_search automatically.
-The reference/public Wrangler config remains OFF by default.
+Google Search Grounding is NOT available for Gemini 3.8 Flash on the Free Tier,
+so the Worker does not send any google_search tool or use the paid Gemini key.
+Ordinary search, multi_search, fetch_page and github_search are unaffected.
 
-For an explicitly approved low-volume paid setup, privately configure:
-- GEMINI_GROUNDING_ENABLED = "1"
-- GEMINI_OUTBOUND_ENABLED = "1"
-- GEMINI_ZERO_SPEND_LOCK = "0"
-- GEMINI_API_KEY_TIER = "paid"
-- GEMINI_SPEND_LIMIT_USD = "0.10"
-- GROUNDING_PUBLIC_ORIGIN = the HTTPS origin of your deployed Worker
-- npx wrangler secret put GEMINI_API_KEY (enter your API key interactively)
+### Setup, private Worker only
 
-The server enforces conservative, **best-effort** local limits of 2 requests/day,
-10 requests/month, an advisory $0.10 monthly reservation budget with $0.01 reserved per
-call, maximum 350 query characters, 768 output tokens, 15-second timeout, one request
-per Worker instance, 2-minute cooldown, and no retries. On HTTP 402 prepay depletion,
-it blocks further requests for 24 hours. All standard free search tools remain functional.
+1. In Google AI Studio, create/select an API key in a project labeled Free tier
+   showing "Set up billing". Do not choose your paid-tier Lolly project.
+2. In the private Worker directory, run:
+       npx wrangler secret put GEMINI_FREE_API_KEY
+   Paste the new key in Wrangler, not in source control or chat.
+3. After confirming the project remains unbilled, set:
+       GEMINI_FREE_ENABLED = "1"
+       GEMINI_FREE_PROJECT_CONFIRMED = "1"
+   and deploy. Both are deliberately "0" in the reference config and until verification.
 
-IMPORTANT: Cloudflare KV counters are eventually consistent and non-atomic; price
-reservations are estimates, NOT a hard dollar cap. Google AI Studio project spend
-caps may lag approximately 10 minutes. A $0 project cap does NOT guarantee zero
-charges on a paid key; the safest zero-bill mode is the default disabled state or
-an unbilled API project. Do not enable this feature if any charge is unacceptable.
+The old GEMINI_API_KEY paid secret is not used and is removed from the live Worker.
+The old google_grounded_search tool is removed. The new tool never automatically
+runs within ordinary search calls and has no paid fallback.
 
-Grounded answers provide cited sources and a short-lived viewer with Google's
-Search Suggestions. Grounded sources should not be treated as an unrestricted raw SERP.
-Do not store API keys in source, Git commits or chat.
+Safety: up to 12 advisory Gemini inference calls/day via Cloudflare KV, maximum
+250-character questions, five retrieved sources, 900 output tokens, a 12-second
+timeout, one in-flight call per Worker isolate, 15-second isolate cooldown, and
+no retries. Google enforces the actual Free Tier quotas; KV is not a globally
+atomic rate limiter. The model returns source identifiers corresponding to the
+MCP's independent search results, not Google-verified grounded citations.
 
-References: https://ai.google.dev/gemini-api/docs/pricing
-https://ai.google.dev/gemini-api/docs/google-search
-https://ai.google.dev/gemini-api/docs/billing
+Free-tier Gemini inputs and outputs may be used by Google to improve products.
+Avoid sending private customer data or confidential supplier information.
+
+Docs: https://ai.google.dev/gemini-api/docs/pricing
+      https://ai.google.dev/gemini-api/docs/billing

@@ -10,7 +10,7 @@ allowed-tools:
   - multi_search
   - fetch_page
   - github_search
-  - google_grounded_search
+  - gemini_free_research
 metadata:
   category: developer-tools
   pricing: free
@@ -41,7 +41,7 @@ Activate this skill whenever the user or task requires:
 
 ## 2. Tool Reference & Execution Profiles
 
-The MCP server exposes five complementary read-only tools, including optional free-tier Gemini Google Search grounding:
+The MCP server exposes four complementary read-only tools:
 
 ### `search`
 Primary search endpoint for single-query investigations.
